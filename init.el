@@ -85,6 +85,8 @@
 (global-company-mode)
 (global-flycheck-mode)
 
+(global-set-key (kbd "C-i") 'clang-format-buffer)
+
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
