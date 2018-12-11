@@ -88,6 +88,7 @@
                               'clang-format-buffer))))
 
 (global-company-mode)
+(global-flycheck-mode)
 
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
