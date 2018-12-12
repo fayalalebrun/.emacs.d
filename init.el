@@ -32,7 +32,7 @@
 
     (setq rtags-use-helm t)
 
-    ;; Shutdown rdm when leaving emacs.
+   ;; Shutdown rdm when leaving emacs.
     (add-hook 'kill-emacs-hook 'rtags-quit-rdm)
     ))
 
@@ -85,7 +85,7 @@
 (global-company-mode)
 (global-flycheck-mode)
 
-(global-set-key (kbd "C-i") 'clang-format-buffer)
+(global-set-key (kbd "C-c u") 'clang-format-buffer)
 
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
