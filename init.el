@@ -78,9 +78,13 @@
     (projectile-global-mode)
     ))
 
-(req-package-finish)
+(req-package glsl-mode
+  :config(...))
 
-(el-get-bundle clang-format)
+(req-package clang-format
+  :config(...))
+
+(req-package-finish)
 
 (global-company-mode)
 (global-flycheck-mode)
@@ -91,6 +95,11 @@
 (define-key projectile-mode-map (kbd "s-p") 'projectile-command-map)
 (define-key projectile-mode-map (kbd "C-c p") 'projectile-command-map)
 
+(add-to-list 'auto-mode-alist '("\\.glsl\\'" . glsl-mode))
+  (add-to-list 'auto-mode-alist '("\\.vert\\'" . glsl-mode))
+  (add-to-list 'auto-mode-alist '("\\.frag\\'" . glsl-mode))
+  (add-to-list 'auto-mode-alist '("\\.geom\\'" . glsl-mode))
+
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
@@ -98,7 +107,7 @@
  ;; If there is more than one, they won't work right.
  '(package-selected-packages
    (quote
-    (## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
