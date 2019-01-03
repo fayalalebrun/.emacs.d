@@ -1,20 +1,9 @@
 (require 'package)
-
 (add-to-list 'package-archives
-             '("melpa" . "http://melpa.org/packages/") t)
-
-
+	     '("melpa" . "http://melpa.org/packages/") t)
 (package-initialize)
 
-(global-set-key (kbd "C-x g") 'magit-status)
-
 (require 'req-package)
-
-(req-package el-get ;; prepare el-get (optional)
-  :force t ;; load package immediately, no dependency resolution
-  :config
-  (add-to-list 'el-get-recipe-path "~/.emacs.d/el-get/el-get/recipes")
-  (el-get 'sync))
 
 (req-package magit
   :config(...))
@@ -91,6 +80,8 @@
 
 (global-set-key (kbd "C-c u") 'clang-format-buffer)
 
+(global-set-key (kbd "C-x g") 'magit-status)
+
 (projectile-mode +1)
 (define-key projectile-mode-map (kbd "s-p") 'projectile-command-map)
 (define-key projectile-mode-map (kbd "C-c p") 'projectile-command-map)
@@ -107,7 +98,7 @@
  ;; If there is more than one, they won't work right.
  '(package-selected-packages
    (quote
-    (glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
