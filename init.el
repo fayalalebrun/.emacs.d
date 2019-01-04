@@ -73,11 +73,11 @@
   :config(...))
 
 (req-package clang-format
-  :config(...))
+  :config(progn
+	   (define-key c-mode-base-map (kbd "C-c u") 'clang-format-buffer)
+	   ))
 
 (req-package-finish)
-
-(global-set-key (kbd "C-c u") 'clang-format-buffer)
 
 (global-set-key (kbd "C-x g") 'magit-status)
 
