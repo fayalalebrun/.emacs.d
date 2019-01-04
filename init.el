@@ -6,7 +6,9 @@
 (require 'req-package)
 
 (req-package magit
-  :config(...))
+  :config(progn
+	   (global-set-key (kbd "C-x g") 'magit-status)
+	   ))
 
 (req-package rtags
   :config
@@ -67,10 +69,18 @@
   :config
   (progn
     (projectile-global-mode)
+    (projectile-mode +1)
+    (define-key projectile-mode-map (kbd "s-p") 'projectile-command-map)
+    (define-key projectile-mode-map (kbd "C-c p") 'projectile-command-map)
     ))
 
 (req-package glsl-mode
-  :config(...))
+  :config(progn
+	   (add-to-list 'auto-mode-alist '("\\.glsl\\'" . glsl-mode))
+	   (add-to-list 'auto-mode-alist '("\\.vert\\'" . glsl-mode))
+           (add-to-list 'auto-mode-alist '("\\.frag\\'" . glsl-mode))
+	   (add-to-list 'auto-mode-alist '("\\.geom\\'" . glsl-mode))
+	   ))
 
 (req-package clang-format
   :config(progn
@@ -79,16 +89,6 @@
 
 (req-package-finish)
 
-(global-set-key (kbd "C-x g") 'magit-status)
-
-(projectile-mode +1)
-(define-key projectile-mode-map (kbd "s-p") 'projectile-command-map)
-(define-key projectile-mode-map (kbd "C-c p") 'projectile-command-map)
-
-(add-to-list 'auto-mode-alist '("\\.glsl\\'" . glsl-mode))
-  (add-to-list 'auto-mode-alist '("\\.vert\\'" . glsl-mode))
-  (add-to-list 'auto-mode-alist '("\\.frag\\'" . glsl-mode))
-  (add-to-list 'auto-mode-alist '("\\.geom\\'" . glsl-mode))
 
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
