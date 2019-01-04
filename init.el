@@ -42,6 +42,7 @@
     (rtags-diagnostics)
     (setq rtags-completions-enabled t)
     (push 'company-rtags company-backends)
+    (add-hook 'c++-mode-hook 'company-mode)
     ))
 
 ;; Live code checking.
@@ -59,6 +60,7 @@
       )
     (add-hook 'c-mode-hook #'setup-flycheck-rtags)
     (add-hook 'c++-mode-hook #'setup-flycheck-rtags)
+    (add-hook 'c++-mode-hook 'flycheck-mode)
     ))
 
 (req-package projectile
@@ -74,9 +76,6 @@
   :config(...))
 
 (req-package-finish)
-
-(global-company-mode)
-(global-flycheck-mode)
 
 (global-set-key (kbd "C-c u") 'clang-format-buffer)
 
