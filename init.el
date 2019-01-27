@@ -5,14 +5,21 @@
 	     '("melpa" . "http://melpa.org/packages/") t)
 (package-initialize)
 
+
+(dolist (package '(req-package))
+   (unless (package-installed-p package)
+       (package-install package)))
+
 (require 'req-package)
 
 (req-package magit
+  :ensure t
   :config(progn
 	   (global-set-key (kbd "C-x g") 'magit-status)
 	   ))
 
 (req-package rtags
+  :ensure t
   :config
   (progn
     (unless (rtags-executable-find "rc") (error "Binary rc is not installed!"))
@@ -29,9 +36,15 @@
     (add-hook 'kill-emacs-hook 'rtags-quit-rdm)
     ))
 
+(req-package helm
+  :ensure t
+  :config (...)
+  )
+
 ;; TODO: Has no coloring! How can I get coloring?
 (req-package helm-rtags
   :require helm rtags
+  :ensure t
   :config
   (progn
     (global-set-key (kbd "M-x") 'helm-M-x)
@@ -42,9 +55,15 @@
     (setq rtags-display-result-backend 'helm)
     ))
 
+(req-package company
+  :ensure t
+  :config (...)
+  )
+
 ;; Use rtags for auto-completion.
 (req-package company-rtags
   :require company rtags
+  :ensure t
   :config
   (progn
     (setq rtags-autostart-diagnostics t)
@@ -54,9 +73,15 @@
     (add-hook 'c++-mode-hook 'company-mode)
     ))
 
+(req-package flycheck
+  :ensure t
+  :config (...)
+  )
+
 ;; Live code checking.
 (req-package flycheck-rtags
   :require flycheck rtags
+  :ensure t
   :config
   (progn
     ;; ensure that we use only rtags checking
@@ -73,6 +98,7 @@
     ))
 
 (req-package projectile
+  :ensure t
   :config
   (progn
     (projectile-global-mode)
@@ -82,6 +108,7 @@
     ))
 
 (req-package glsl-mode
+  :ensure t
   :config(progn
 	   (add-to-list 'auto-mode-alist '("\\.glsl\\'" . glsl-mode))
 	   (add-to-list 'auto-mode-alist '("\\.vert\\'" . glsl-mode))
@@ -90,17 +117,21 @@
 	   ))
 
 (req-package clang-format
+  :ensure t
   :config(progn
 	   (define-key c-mode-base-map (kbd "C-c u") 'clang-format-buffer)
 	   ))
 
 (req-package eshell
+  :ensure t
   :config(progn
 	   (add-to-list 'eshell-visual-commands "zangband" ())
 	   (add-to-list 'eshell-visual-commands "tmux" ())
 	   ))
 
 (req-package-finish)
+
+
 
 
 (custom-set-variables
@@ -115,7 +146,7 @@
  '(custom-enabled-themes (quote (manoj-dark)))
  '(package-selected-packages
    (quote
-    (pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
