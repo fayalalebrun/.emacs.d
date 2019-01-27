@@ -94,6 +94,12 @@
 	   (define-key c-mode-base-map (kbd "C-c u") 'clang-format-buffer)
 	   ))
 
+(req-package eshell
+  :config(progn
+	   (add-to-list 'eshell-visual-commands "zangband" ())
+	   (add-to-list 'eshell-visual-commands "tmux" ())
+	   ))
+
 (req-package-finish)
 
 
