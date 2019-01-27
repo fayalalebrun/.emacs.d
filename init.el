@@ -127,6 +127,12 @@
 (req-package eshell
   :ensure t
   :config(progn
+	   (add-hook 'eshell-mode-hook
+	     (lambda ()
+               (eshell-cmpl-initialize)
+               (define-key eshell-mode-map [remap eshell-pcomplete] 'helm-esh-pcomplete)
+               (define-key eshell-mode-map (kbd "M-s f") 'helm-eshell-prompts-all)
+               (define-key eshell-mode-map (kbd "M-r") 'helm-eshell-history)))
 	   (add-to-list 'eshell-visual-commands "zangband" ())
 	   (add-to-list 'eshell-visual-commands "tmux" ())
 	   ))
