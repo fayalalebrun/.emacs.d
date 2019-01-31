@@ -16,6 +16,17 @@
 
 (require 'req-package)
 
+(req-package eww
+  :ensure t
+  :config(progn
+	   (defun eww-new ()
+	     (interactive)
+	     (let ((url (read-from-minibuffer "Enter URL or keywords: ")))
+	       (switch-to-buffer (generate-new-buffer "eww"))
+	       (eww-mode)
+	       (eww url)))
+	   ))
+
 (req-package magit
   :ensure t
   :config(progn
