@@ -137,6 +137,28 @@
 	   (add-to-list 'eshell-visual-commands "tmux" ())
 	   ))
 
+
+(req-package elpy
+  :require flycheck
+  :ensure t
+  :config (progn
+	    (elpy-enable)
+	    (setq elpy-rpc-python-command "python3")
+	    (setenv "IPY_TEST_SIMPLE_PROMPT" "1")
+	    (setq python-shell-interpreter "ipython3"
+		  python-shell-interpreter-args "-i")
+	    (setq elpy-modules (delq 'elpy-module-flymake elpy-modules))
+	    (add-hook 'elpy-mode-hook 'flycheck-mode)
+	    ))
+
+
+(req-package py-autopep8
+  :require elpy
+  :ensure t
+  :config (progn
+	    (add-hook 'elpy-mode-hook 'py-autopep8-enable-on-save)
+	    ))
+
 (req-package-finish)
 
 
@@ -154,7 +176,7 @@
  '(custom-enabled-themes (quote (manoj-dark)))
  '(package-selected-packages
    (quote
-    (req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
