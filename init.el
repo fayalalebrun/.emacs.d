@@ -150,7 +150,10 @@
 	    (setq python-shell-interpreter "ipython3"
 		  python-shell-interpreter-args "-i")
 	    (setq elpy-modules (delq 'elpy-module-flymake elpy-modules))
+
+
 	    (add-hook 'elpy-mode-hook 'flycheck-mode)
+	    (setq flycheck-python-flake8-executable "flake8")
 	    ))
 
 
