@@ -7,6 +7,8 @@
 	     '("melpa" . "http://melpa.org/packages/") t)
 (package-initialize)
 
+(unless package-archive-contents
+  (package-refresh-contents))
 
 (dolist (package '(req-package))
    (unless (package-installed-p package)
