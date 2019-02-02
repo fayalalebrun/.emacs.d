@@ -175,6 +175,18 @@
 	    (add-hook 'elpy-mode-hook 'py-autopep8-enable-on-save)
 	    ))
 
+(req-package cython-mode
+  :ensure t
+  :config (...))
+
+(req-package flycheck-cython
+  :require flycheck cython-mode
+  :ensure t
+  :config (progn
+	    (add-hook 'cython-mode-hook 'flycheck-mode)
+	    (setq flycheck-cython-executable "cython3")
+	    ))
+
 (req-package-finish)
 
 
@@ -190,9 +202,10 @@
  '(ansi-color-names-vector
    ["black" "red3" "ForestGreen" "yellow3" "blue" "magenta3" "DeepSkyBlue" "gray50"])
  '(custom-enabled-themes (quote (manoj-dark)))
+ '(org-export-backends (quote (ascii html icalendar latex md)))
  '(package-selected-packages
    (quote
-    (elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
