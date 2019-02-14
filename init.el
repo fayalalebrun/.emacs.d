@@ -189,6 +189,10 @@
 	    (setq flycheck-cython-executable "cython3")
 	    ))
 
+(req-package neotree
+  :ensure t
+  :config (..))
+
 (req-package-finish)
 
 
