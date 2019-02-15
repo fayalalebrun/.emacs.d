@@ -187,6 +187,7 @@
   :config (progn
 	    (add-hook 'cython-mode-hook 'flycheck-mode)
 	    (setq flycheck-cython-executable "cython3")
+	    (setq flycheck-cython-include-dir "~/Documents/workspace/openage/bin/") 
 	    ))
 
 (req-package neotree
