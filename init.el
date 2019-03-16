@@ -124,6 +124,14 @@
     (define-key projectile-mode-map (kbd "C-c p") 'projectile-command-map)
     ))
 
+(req-package platformio-mode
+  :ensure t
+  :require projectile
+  :config
+  (progn    
+    (add-hook 'c++-mode-hook 'platformio-conditionally-enable)
+    ))
+
 (req-package glsl-mode
   :ensure t
   :config(progn
