@@ -18,6 +18,7 @@
 
 (require 'req-package)
 
+
 (req-package org-download
   :ensure t
   :config(...)
@@ -39,6 +40,12 @@
   :config(progn
 	   (global-set-key (kbd "C-x g") 'magit-status)
 	   ))
+
+(req-package pdf-tools
+  :ensure t
+  :config(progn
+	   (pdf-tools-install))
+  )
 
 (req-package rtags
   :ensure t
