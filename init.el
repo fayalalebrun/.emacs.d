@@ -1,3 +1,5 @@
+(setq gnutls-algorithm-priority "NORMAL:-VERS-TLS1.3")
+
 (menu-bar-mode -1)
 (tool-bar-mode -1)
 (scroll-bar-mode -1)
@@ -15,6 +17,15 @@
 (dolist (package '(req-package))
    (unless (package-installed-p package)
        (package-install package)))
+
+
+(require 'cypher-mode)
+(load "~/.emacs.d/n4js")
+(setq n4js-cli-program "cypher-shell")
+
+(load "~/.emacs.d/js-doc")
+
+
 
 (require 'req-package)
 
@@ -219,10 +230,118 @@
   :ensure t
   :config (..))
 
+(req-package js2-mode
+  :ensure t
+  :config (progn
+	    (add-to-list 'auto-mode-alist '("\\.js\\'" . js2-mode))
+	    (add-hook 'js2-mode-hook #'js2-imenu-extras-mode)))
+
+(req-package js-doc
+  :require js2-mode
+  :config (progn
+	    (setq js-doc-mail-address "frankxlebrun@gmail.com"
+		  js-doc-author (format "Francisco Ayala Le Brun <%s>" js-doc-mail-address)
+		  js-doc-url ""
+		  js-doc-license "")
+
+	    (add-hook 'js2-mode-hook
+		      #'(lambda ()
+			  (define-key js2-mode-map "\C-ci" 'js-doc-insert-function-doc)
+			  (define-key js2-mode-map "@" 'js-doc-insert-tag)))
+
+	    ))
+
+
+(req-package js2-refactor
+  :require js2-mode
+  :ensure t
+  :config (
+	   (add-hook 'js2-mode-hook #'js2-refactor-mode)
+	   (js2r-add-keybindings-with-prefix "C-c C-r")
+	   (define-key js2-mode-map (kbd "C-k") #'js2r-kill)
+	   ))
+
+(req-package ag
+  :ensure t
+  :config (..))
+
+(req-package xref-js2
+  :require ag js2-mode
+  :ensure t
+  :config (
+	   (add-hook 'js2-mode-hook (lambda ()
+				      (add-hook 'xref-backend-functions #'xref-js2-xref-backend nil t)))
+	   (define-key js-mode-map (kbd "M-.") nil)
+	   ))
+
+(req-package company-tern
+  :require company
+  :ensure t
+  :config (
+	   (add-to-list 'company-backends 'company-tern)
+	   (add-hook 'js2-mode-hook (lambda ()
+                           (tern-mode)
+                           (company-mode)))
+	   (define-key tern-mode-keymap (kbd "M-.") nil)
+	   (define-key tern-mode-keymap (kbd "M-,") nil)
+	   ))
+
+
+(req-package org :ensure org-plus-contrib :pin org)
+
+(req-package meghanada
+  :ensure t
+  :config (
+	   add-hook 'java-mode-hook
+		     (lambda ()
+		       ;; meghanada-mode on
+		       (meghanada-mode t)
+		       (flycheck-mode +1)
+		       (setq c-basic-offset 2)
+		       ;; use code format
+		       (add-hook 'before-save-hook 'meghanada-code-beautify-before-save)))
+	   (cond
+	    ((eq system-type 'windows-nt)
+	     (setq meghanada-java-path (expand-file-name "bin/java.exe" (getenv "JAVA_HOME")))
+	     (setq meghanada-maven-path "mvn.cmd"))
+	    (t
+	     (setq meghanada-java-path "java")
+	     (setq meghanada-maven-path "mvn"))
+	   ))
+
 (req-package-finish)
 
 
+(require 'ox-publish)
 
+(setq org-publish-project-alist
+      '(
+
+  ("org-fal"
+          ;; Path to your org files.
+          :base-directory "~/Documents/c-quiche/org"
+          :base-extension "org"
+
+          ;; Path to your Jekyll project.
+          :publishing-directory "~/Documents/c-quiche/_posts"
+          :recursive t
+          :publishing-function org-html-publish-to-html
+          :headline-levels 4
+          :html-extension "html"
+          :body-only t ;; Only export section between <body> </body>
+    )
+
+
+    ("org-static-fal"
+          :base-directory "~/Documents/c-quiche/org/"
+          :base-extension "css\\|js\\|png\\|jpg\\|gif\\|pdf\\|mp3\\|ogg\\|swf\\|php"
+          :publishing-directory "~/Documents/c-quiche/assets"
+          :recursive t
+          :publishing-function org-publish-attachment)
+
+    ("fal" :components ("org-fal" "org-static-fal"))
+
+))
 
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
@@ -237,7 +356,7 @@
  '(org-export-backends (quote (ascii html icalendar latex md)))
  '(package-selected-packages
    (quote
-    (lua-mode nasm-mode org-download neotree cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
