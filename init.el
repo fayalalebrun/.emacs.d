@@ -102,7 +102,11 @@
 
 (req-package company
   :ensure t
-  :config (...)
+  :hook (prog-mode . company-mode)
+  :config (
+	   (setq company-tooltip-align-annotations t)
+           (setq company-minimum-prefix-length 1)
+	   )
   )
 
 ;; Use rtags for auto-completion.
@@ -120,7 +124,7 @@
 
 (req-package flycheck
   :ensure t
-  :config (...)
+  :config (prog-mode . flycheck-mode)
   )
 
 ;; Live code checking.
@@ -141,6 +145,8 @@
     (add-hook 'c++-mode-hook #'setup-flycheck-rtags)
     (add-hook 'c++-mode-hook 'flycheck-mode)
     ))
+
+
 
 (req-package projectile
   :ensure t
@@ -341,7 +347,29 @@
 
     ("fal" :components ("org-fal" "org-static-fal"))
 
-))
+    ))
+
+(req-package eglot
+  :ensure t
+  :hook (company-mode)
+  :demand)
+
+(req-package toml-mode
+  :ensure t
+  :mode "\\.toml\\'"
+)
+
+(req-package rust-mode
+  :ensure t
+  :hook (eglot)
+  :config (setq rust-format-on-save t)
+)
+
+(req-package cargo
+  :ensure t
+  :hook (rust-mode . cargo-minor-mode)
+  :hook ((rust-mode toml-mode) . cargo-minor-mode))
+
 
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
@@ -356,7 +384,7 @@
  '(org-export-backends (quote (ascii html icalendar latex md)))
  '(package-selected-packages
    (quote
-    (elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
