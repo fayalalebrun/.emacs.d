@@ -31,6 +31,8 @@
 
 (require 'req-package)
 
+
+
 (req-package xelb
   :ensure t
   )
@@ -113,6 +115,14 @@
     (global-set-key (kbd "C-s") 'helm-occur)
     (setq rtags-display-result-backend 'helm)
     ))
+
+(req-package helm-tramp
+  :ensure t
+  :config (progn
+	    (setq tramp-default-method "ssh")
+	    (define-key global-map (kbd "C-c s") 'helm-tramp)
+	    )
+  )
 
 (req-package company
   :ensure t
