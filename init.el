@@ -1,3 +1,4 @@
+
 (setq gnutls-algorithm-priority "NORMAL:-VERS-TLS1.3")
 
 (menu-bar-mode -1)
@@ -27,9 +28,22 @@
 
 
 
+
 (require 'req-package)
 
+(req-package xelb
+  :ensure t
+  )
 
+
+(req-package exwm
+  :require xelb
+  :ensure t
+  :config (load "~/.emacs.d/exwm-conf.el")
+
+	 )
+
+  
 (req-package org-download
   :ensure t
   :config(...)
@@ -384,7 +398,7 @@
  '(org-export-backends (quote (ascii html icalendar latex md)))
  '(package-selected-packages
    (quote
-    (flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
