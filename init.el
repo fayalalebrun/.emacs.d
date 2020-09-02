@@ -79,42 +79,16 @@
 	   (pdf-tools-install))
   )
 
-(req-package rtags
-  :ensure t
-  :config
-  (progn
-    (unless (rtags-executable-find "rc") (error "Binary rc is not installed!"))
-    (unless (rtags-executable-find "rdm") (error "Binary rdm is not installed!"))
 
-    (define-key c-mode-base-map (kbd "M-.") 'rtags-find-symbol-at-point)
-    (define-key c-mode-base-map (kbd "M-,") 'rtags-find-references-at-point)
-    (define-key c-mode-base-map (kbd "M-?") 'rtags-display-summary)
-    (rtags-enable-standard-keybindings)
-
-    (setq rtags-use-helm t)
-
-   ;; Shutdown rdm when leaving emacs.
-    (add-hook 'kill-emacs-hook 'rtags-quit-rdm)
-    ))
 
 (req-package helm
   :ensure t
-  :config (...)
+  :config ( (setq helm-display-function 'helm-display-buffer-in-own-frame
+		  helm-display-buffer-reuse-frame t
+		  helm-use-undecorated-frame-option t)
+	    )
   )
 
-;; TODO: Has no coloring! How can I get coloring?
-(req-package helm-rtags
-  :require helm rtags
-  :ensure t
-  :config
-  (progn
-    (global-set-key (kbd "M-x") 'helm-M-x)
-    (global-set-key (kbd "C-x r b") 'helm-filtered-bookmarks)
-    (global-set-key (kbd "C-x C-f") 'helm-find-files)
-    (global-set-key (kbd "C-x C-b") 'helm-buffers-list)
-    (global-set-key (kbd "C-s") 'helm-occur)
-    (setq rtags-display-result-backend 'helm)
-    ))
 
 (req-package helm-tramp
   :ensure t
@@ -133,42 +107,12 @@
 	   )
   )
 
-;; Use rtags for auto-completion.
-(req-package company-rtags
-  :require company rtags
-  :ensure t
-  :config
-  (progn
-    (setq rtags-autostart-diagnostics t)
-    (rtags-diagnostics)
-    (setq rtags-completions-enabled t)
-    (push 'company-rtags company-backends)
-    (add-hook 'c++-mode-hook 'company-mode)
-    ))
 
 (req-package flycheck
   :ensure t
-  :config (prog-mode . flycheck-mode)
+  :config (...)
   )
 
-;; Live code checking.
-(req-package flycheck-rtags
-  :require flycheck rtags
-  :ensure t
-  :config
-  (progn
-    ;; ensure that we use only rtags checking
-    ;; https://github.com/Andersbakken/rtags#optional-1
-    (defun setup-flycheck-rtags ()
-      (flycheck-select-checker 'rtags)
-      (setq-local flycheck-highlighting-mode nil) ;; RTags creates more accurate overlays.
-      (setq-local flycheck-check-syntax-automatically nil)
-      (rtags-set-periodic-reparse-timeout 2.0)  ;; Run flycheck 2 seconds after being idle.
-      )
-    (add-hook 'c-mode-hook #'setup-flycheck-rtags)
-    (add-hook 'c++-mode-hook #'setup-flycheck-rtags)
-    (add-hook 'c++-mode-hook 'flycheck-mode)
-    ))
 
 
 

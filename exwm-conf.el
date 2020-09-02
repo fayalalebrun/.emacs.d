@@ -28,7 +28,7 @@
 
 
 ;; Set the initial number of workspaces (they can also be created later).
-(setq exwm-workspace-number 4)
+(setq exwm-workspace-number 9)
 
 ;; All buffers created in EXWM mode are named "*EXWM*". You may want to
 ;; change it in `exwm-update-class-hook' and `exwm-update-title-hook', which
@@ -59,7 +59,8 @@
         ;; Bind "s-r" to exit char-mode and fullscreen mode.
         ([?\s-r] . exwm-reset)
         ;; Bind "s-w" to switch workspace interactively.
-        ([?\s-w] . exwm-workspace-switch)
+	([?\s-w] . exwm-workspace-switch)        
+	
         ;; Bind "s-0" to "s-9" to switch to a workspace by its index.
         ,@(mapcar (lambda (i)
                     `(,(kbd (format "s-%d" i)) .
@@ -75,7 +76,7 @@
         ;; Bind "s-<f2>" to "slock", a simple X display locker.
         ([s-f2] . (lambda ()
 		    (interactive)
-		    (start-process "" nil "/usr/bin/slock")))))
+		    (start-process "" nil "/usr/bin/i3lock")))))
 
 ;; To add a key binding only available in line-mode, simply define it in
 ;; `exwm-mode-map'.  The following example shortens 'C-c q' to 'C-q'.
