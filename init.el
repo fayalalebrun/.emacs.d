@@ -15,7 +15,7 @@
 (unless package-archive-contents
   (package-refresh-contents))
 
-(dolist (package '(req-package))
+(dolist (package '(use-package))
    (unless (package-installed-p package)
        (package-install package)))
 
@@ -29,94 +29,88 @@
 
 
 
-(require 'req-package)
+(require 'use-package)
 
 
 
-(req-package xelb
+(use-package xelb
   :ensure t
   )
 
 
-(req-package exwm
-  :require xelb
+(use-package exwm
   :ensure t
-  :config (load "~/.emacs.d/exwm-conf.el")
-
 	 )
-
+(load "~/.emacs.d/exwm-conf.el")
   
-(req-package org-download
+(use-package org-download
   :ensure t
-  :config(...)
   )
 
-(req-package lua-mode
+(use-package lua-mode
   :ensure t
-  :config(...)
   )
 
-(req-package eww
+(use-package eww
   :ensure t
-  :config(progn
-	   (defun eww-new ()
-	     (interactive)
-	     (let ((url (read-from-minibuffer "Enter URL or keywords: ")))
-	       (switch-to-buffer (generate-new-buffer "eww"))
-	       (eww-mode)
-	       (eww url)))
-	   ))
-
-(req-package magit
-  :ensure t
-  :config(progn
-	   (global-set-key (kbd "C-x g") 'magit-status)
-	   ))
-
-(req-package pdf-tools
-  :ensure t
-  :config(progn
-	   (pdf-tools-install))
   )
 
+(defun eww-new ()
+(interactive)
+(let ((url (read-from-minibuffer "Enter URL or keywords: ")))
+  (switch-to-buffer (generate-new-buffer "eww"))
+  (eww-mode)
+  (eww url)))
 
-
-(req-package helm
+(use-package magit
   :ensure t
-  :config ( (setq helm-display-function 'helm-display-buffer-in-own-frame
-		  helm-display-buffer-reuse-frame t
-		  helm-use-undecorated-frame-option t)
-	    )
+
+	   
+)
+(global-set-key (kbd "C-x g") 'magit-status)
+
+
+(use-package pdf-tools
+  :ensure t
+  )
+(pdf-tools-install)
+
+
+(use-package helm
+  :ensure t	     
   )
 
 
-(req-package helm-tramp
-  :ensure t
-  :config (progn
-	    (setq tramp-default-method "ssh")
-	    (define-key global-map (kbd "C-c s") 'helm-tramp)
-	    )
+
+(global-set-key (kbd "M-x") #'helm-M-x)
+(global-set-key (kbd "C-x r b") #'helm-filtered-bookmarks)
+(global-set-key (kbd "C-x C-f") #'helm-find-files)
+(global-set-key (kbd "C-s") #'helm-occur)
+(global-set-key (kbd "C-x C-b") #'helm-buffers-list)
+
+(use-package helm-tramp
+  :ensure t	    
   )
 
-(req-package company
+(setq tramp-default-method "ssh")
+(define-key global-map (kbd "C-c s") 'helm-tramp)
+
+(use-package company
   :ensure t
   :hook (prog-mode . company-mode)
-  :config (
-	   (setq company-tooltip-align-annotations t)
-           (setq company-minimum-prefix-length 1)
-	   )
   )
+(setq company-tooltip-align-annotations t)
+(setq company-minimum-prefix-length 1)
 
 
-(req-package flycheck
+(use-package flycheck
   :ensure t
-  :config (...)
   )
 
 
 
 
-(req-package projectile
+(use-package projectile
   :ensure t
   :config
   (progn
@@ -126,15 +120,14 @@
     (define-key projectile-mode-map (kbd "C-c p") 'projectile-command-map)
     ))
 
-(req-package platformio-mode
+(use-package platformio-mode
   :ensure t
-  :require projectile
   :config
   (progn    
     (add-hook 'c++-mode-hook 'platformio-conditionally-enable)
     ))
 
-(req-package glsl-mode
+(use-package glsl-mode
   :ensure t
   :config(progn
 	   (add-to-list 'auto-mode-alist '("\\.glsl\\'" . glsl-mode))
@@ -143,77 +136,69 @@
 	   (add-to-list 'auto-mode-alist '("\\.geom\\'" . glsl-mode))
 	   ))
 
-(req-package clang-format
+(use-package clang-format
   :ensure t
-  :config(progn
-	   (define-key c-mode-base-map (kbd "C-c u") 'clang-format-buffer)
-	   ))
+  )
 
-(req-package eshell
+
+(use-package eshell
+  :ensure t)
+
+(add-hook 'eshell-mode-hook (lambda ()
+  (eshell-cmpl-initialize)
+  (define-key eshell-mode-map [remap eshell-pcomplete] 'helm-esh-pcomplete)
+  (define-key eshell-mode-map (kbd "M-s f") 'helm-eshell-prompts-all)
+  (define-key eshell-mode-map (kbd "M-r") 'helm-eshell-history)))
+
+
+(use-package elpy
   :ensure t
-  :config(progn
-	   (add-hook 'eshell-mode-hook
-	     (lambda ()
-               (eshell-cmpl-initialize)
-               (define-key eshell-mode-map [remap eshell-pcomplete] 'helm-esh-pcomplete)
-               (define-key eshell-mode-map (kbd "M-s f") 'helm-eshell-prompts-all)
-               (define-key eshell-mode-map (kbd "M-r") 'helm-eshell-history)))
-	   (add-to-list 'eshell-visual-commands "zangband" ())
-	   (add-to-list 'eshell-visual-commands "tmux" ())
-	   ))
+  )
+
+(elpy-enable)
+(setq elpy-rpc-python-command "python3")
+(setenv "IPY_TEST_SIMPLE_PROMPT" "1")
+(setq python-shell-interpreter "ipython3"
+      python-shell-interpreter-args "-i")
+(setq elpy-modules (delq 'elpy-module-flymake elpy-modules))
+
+(add-hook 'elpy-mode-hook 'flycheck-mode)
+(setq flycheck-python-flake8-executable "flake8")
 
 
-(req-package elpy
-  :require flycheck
+(use-package py-autopep8
   :ensure t
-  :config (progn
-	    (elpy-enable)
-	    (setq elpy-rpc-python-command "python3")
-	    (setenv "IPY_TEST_SIMPLE_PROMPT" "1")
-	    (setq python-shell-interpreter "ipython3"
-		  python-shell-interpreter-args "-i")
-	    (setq elpy-modules (delq 'elpy-module-flymake elpy-modules))
+  )
 
+(add-hook 'elpy-mode-hook 'py-autopep8-enable-on-save)
 
-	    (add-hook 'elpy-mode-hook 'flycheck-mode)
-	    (setq flycheck-python-flake8-executable "flake8")
-	    ))
-
-
-(req-package py-autopep8
-  :require elpy
+(use-package cython-mode
   :ensure t
-  :config (progn
-	    (add-hook 'elpy-mode-hook 'py-autopep8-enable-on-save)
-	    ))
+  )
 
-(req-package cython-mode
+(use-package flycheck-cython
   :ensure t
-  :config (...))
+)
 
-(req-package flycheck-cython
-  :require flycheck cython-mode
+(add-hook 'cython-mode-hook 'flycheck-mode)
+(setq flycheck-cython-executable "cython3")
+(setq flycheck-cython-include-dir "~/Documents/workspace/openage/bin/") 
+
+(use-package neotree
   :ensure t
-  :config (progn
-	    (add-hook 'cython-mode-hook 'flycheck-mode)
-	    (setq flycheck-cython-executable "cython3")
-	    (setq flycheck-cython-include-dir "~/Documents/workspace/openage/bin/") 
-	    ))
+  )
 
-(req-package neotree
+(use-package js2-mode
   :ensure t
-  :config (..))
+)
 
-(req-package js2-mode
-  :ensure t
-  :config (progn
-	    (add-to-list 'auto-mode-alist '("\\.js\\'" . js2-mode))
-	    (add-hook 'js2-mode-hook #'js2-imenu-extras-mode)))
+(add-to-list 'auto-mode-alist '("\\.js\\'" . js2-mode))
+(add-hook 'js2-mode-hook #'js2-imenu-extras-mode)
 
-(req-package js-doc
-  :require js2-mode
-  :config (progn
-	    (setq js-doc-mail-address "frankxlebrun@gmail.com"
+(use-package js-doc
+  :ensure t)
+
+(setq js-doc-mail-address "frankxlebrun@gmail.com"
 		  js-doc-author (format "Francisco Ayala Le Brun <%s>" js-doc-mail-address)
 		  js-doc-url ""
 		  js-doc-license "")
@@ -223,67 +208,42 @@
 			  (define-key js2-mode-map "\C-ci" 'js-doc-insert-function-doc)
 			  (define-key js2-mode-map "@" 'js-doc-insert-tag)))
 
-	    ))
 
-
-(req-package js2-refactor
-  :require js2-mode
+(use-package js2-refactor
   :ensure t
-  :config (
-	   (add-hook 'js2-mode-hook #'js2-refactor-mode)
-	   (js2r-add-keybindings-with-prefix "C-c C-r")
-	   (define-key js2-mode-map (kbd "C-k") #'js2r-kill)
-	   ))
+  )
 
-(req-package ag
+(add-hook 'js2-mode-hook #'js2-refactor-mode)
+(js2r-add-keybindings-with-prefix "C-c C-r")
+(define-key js2-mode-map (kbd "C-k") #'js2r-kill)
+
+(use-package ag
   :ensure t
-  :config (..))
+  )
 
-(req-package xref-js2
-  :require ag js2-mode
+(use-package xref-js2
   :ensure t
-  :config (
-	   (add-hook 'js2-mode-hook (lambda ()
-				      (add-hook 'xref-backend-functions #'xref-js2-xref-backend nil t)))
-	   (define-key js-mode-map (kbd "M-.") nil)
-	   ))
+  )
 
-(req-package company-tern
-  :require company
+(add-hook 'js2-mode-hook (lambda ()
+			   (add-hook 'xref-backend-functions #'xref-js2-xref-backend nil t)))
+(define-key js-mode-map (kbd "M-.") nil)
+	   
+
+(use-package company-tern
   :ensure t
-  :config (
-	   (add-to-list 'company-backends 'company-tern)
-	   (add-hook 'js2-mode-hook (lambda ()
-                           (tern-mode)
-                           (company-mode)))
-	   (define-key tern-mode-keymap (kbd "M-.") nil)
-	   (define-key tern-mode-keymap (kbd "M-,") nil)
-	   ))
+  )
+
+(add-to-list 'company-backends 'company-tern)
+(add-hook 'js2-mode-hook (lambda ()
+				      (tern-mode)
+				      (company-mode)))
+(define-key tern-mode-keymap (kbd "M-.") nil)
+(define-key tern-mode-keymap (kbd "M-,") nil)
 
 
-(req-package org :ensure org-plus-contrib :pin org)
 
-(req-package meghanada
-  :ensure t
-  :config (
-	   add-hook 'java-mode-hook
-		     (lambda ()
-		       ;; meghanada-mode on
-		       (meghanada-mode t)
-		       (flycheck-mode +1)
-		       (setq c-basic-offset 2)
-		       ;; use code format
-		       (add-hook 'before-save-hook 'meghanada-code-beautify-before-save)))
-	   (cond
-	    ((eq system-type 'windows-nt)
-	     (setq meghanada-java-path (expand-file-name "bin/java.exe" (getenv "JAVA_HOME")))
-	     (setq meghanada-maven-path "mvn.cmd"))
-	    (t
-	     (setq meghanada-java-path "java")
-	     (setq meghanada-maven-path "mvn"))
-	   ))
 
-(req-package-finish)
 
 
 (require 'ox-publish)
@@ -317,23 +277,22 @@
 
     ))
 
-(req-package eglot
+(use-package eglot
   :ensure t
-  :hook (company-mode)
   :demand)
 
-(req-package toml-mode
+(use-package toml-mode
   :ensure t
   :mode "\\.toml\\'"
 )
 
-(req-package rust-mode
+(use-package rust-mode
   :ensure t
   :hook (eglot)
   :config (setq rust-format-on-save t)
 )
 
-(req-package cargo
+(use-package cargo
   :ensure t
   :hook (rust-mode . cargo-minor-mode)
   :hook ((rust-mode toml-mode) . cargo-minor-mode))
@@ -352,7 +311,7 @@
  '(org-export-backends (quote (ascii html icalendar latex md)))
  '(package-selected-packages
    (quote
-    (helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy req-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy use-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
