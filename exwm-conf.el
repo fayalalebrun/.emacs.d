@@ -111,7 +111,7 @@
 
 ;; You can hide the minibuffer and echo area when they're not used, by
 ;; uncommenting the following line.
-;(setq exwm-workspace-minibuffer-position 'bottom)
+;;(setq exwm-workspace-minibuffer-position 'bottom)
 
 ;; Do not forget to enable EXWM. It will start by itself when things are
 ;; ready.  You can put it _anywhere_ in your configuration.

@@ -297,6 +297,19 @@
   :hook (rust-mode . cargo-minor-mode)
   :hook ((rust-mode toml-mode) . cargo-minor-mode))
 
+(use-package emms
+  :ensure t
+  :config
+  (emms-all)
+  (emms-default-players)
+  )
+
+(use-package shell-pop
+  :ensure t
+  )
+
+
+
 
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
@@ -311,7 +324,13 @@
  '(org-export-backends (quote (ascii html icalendar latex md)))
  '(package-selected-packages
    (quote
-    (helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy use-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))))
+    (shell-pop typing helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy use-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit)))
+ '(shell-pop-shell-type
+   (quote
+    ("terminal" "*terminal*"
+     (lambda nil
+       (term shell-pop-term-shell)))))
+ '(shell-pop-universal-key "<C-return>"))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
