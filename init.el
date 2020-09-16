@@ -279,7 +279,9 @@
 
 (use-package eglot
   :ensure t
-  :demand)
+  :demand
+  :config (add-to-list 'eglot-server-programs '(vhdl-mode . ("ghdl-ls")))
+)
 
 (use-package toml-mode
   :ensure t
@@ -308,7 +310,16 @@
   :ensure t
   )
 
+(use-package yasnippet
+  :ensure t
+  :config (yas-global-mode 1)
+  )
 
+
+(use-package fal-vhdl
+  :bind (:map vhdl-mode-map
+         ("C-c C-k" . fal-vhdl-ghdl-ae))
+  )
 
 
 (custom-set-variables
@@ -321,10 +332,11 @@
  '(ansi-color-names-vector
    ["black" "red3" "ForestGreen" "yellow3" "blue" "magenta3" "DeepSkyBlue" "gray50"])
  '(custom-enabled-themes (quote (manoj-dark)))
+ '(ein:output-area-inlined-images t)
  '(org-export-backends (quote (ascii html icalendar latex md)))
  '(package-selected-packages
    (quote
-    (shell-pop typing helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy use-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit)))
+    (yasnippet yasnippet-snippets shell-pop typing helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy use-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit)))
  '(shell-pop-shell-type
    (quote
     ("terminal" "*terminal*"
