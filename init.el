@@ -1,11 +1,12 @@
 
 (setq gnutls-algorithm-priority "NORMAL:-VERS-TLS1.3")
 
+(show-paren-mode 1)
 (menu-bar-mode -1)
 (tool-bar-mode -1)
 (scroll-bar-mode -1)
 (toggle-truncate-lines)
-
+(add-to-list 'load-path "~/.emacs.d/lisp")
 
 (require 'package)
 (add-to-list 'package-archives
@@ -342,7 +343,10 @@
     ("terminal" "*terminal*"
      (lambda nil
        (term shell-pop-term-shell)))))
- '(shell-pop-universal-key "<C-return>"))
+ '(shell-pop-universal-key "<C-return>")
+ '(vhdl-upper-case-attributes t)
+ '(vhdl-upper-case-keywords t)
+ '(vhdl-upper-case-types t))
 (custom-set-faces
  ;; custom-set-faces was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
