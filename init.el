@@ -65,8 +65,7 @@
 
 (use-package magit
   :ensure t
-
-	   
+  :bind (("C-x g" . magit-status))	   
 )
 (global-set-key (kbd "C-x g") 'magit-status)
 
@@ -78,30 +77,31 @@
 
 
 (use-package helm
-  :ensure t	     
+  :ensure t
+  :bind(("M-x" . helm-M-x)
+	("C-x r b" . helm-filtered-bookmarks)
+	("C-x C-f" . helm-find-files)
+	("C-s" . helm-occur)
+	("C-x C-b" . helm-buffers-list))
   )
 
-
-
-(global-set-key (kbd "M-x") #'helm-M-x)
-(global-set-key (kbd "C-x r b") #'helm-filtered-bookmarks)
-(global-set-key (kbd "C-x C-f") #'helm-find-files)
-(global-set-key (kbd "C-s") #'helm-occur)
-(global-set-key (kbd "C-x C-b") #'helm-buffers-list)
 
 (use-package helm-tramp
-  :ensure t	    
+  :ensure t
+  :bind(("C-c s" . helm-tramp))
+  :init(setq tramp-default-method "ssh")
   )
 
-(setq tramp-default-method "ssh")
-(define-key global-map (kbd "C-c s") 'helm-tramp)
+
+
 
 (use-package company
   :ensure t
   :hook (prog-mode . company-mode)
+  :init(setq company-tooltip-align-annotations t)
+	(setq company-minimum-prefix-length 1)
   )
-(setq company-tooltip-align-annotations t)
-(setq company-minimum-prefix-length 1)
+
 
 
 (use-package flycheck
@@ -143,35 +143,39 @@
 
 
 (use-package eshell
-  :ensure t)
-
-(add-hook 'eshell-mode-hook (lambda ()
+  :hook (eshell-mode-hook . (lambda ()
   (eshell-cmpl-initialize)
   (define-key eshell-mode-map [remap eshell-pcomplete] 'helm-esh-pcomplete)
   (define-key eshell-mode-map (kbd "M-s f") 'helm-eshell-prompts-all)
   (define-key eshell-mode-map (kbd "M-r") 'helm-eshell-history)))
+  :ensure t)
+
 
 
 (use-package elpy
   :ensure t
+  :config
+  (elpy-enable)
+  (setq elpy-rpc-python-command "python3")
+  (setenv "IPY_TEST_SIMPLE_PROMPT" "1")
+  (setq python-shell-interpreter "ipython3"
+	python-shell-interpreter-args "-i")
+  (setq elpy-modules (delq 'elpy-module-flymake elpy-modules))
+
+  (add-hook 'elpy-mode-hook 'flycheck-mode)
+  (setq flycheck-python-flake8-executable "flake8")
+
+  
   )
 
-(elpy-enable)
-(setq elpy-rpc-python-command "python3")
-(setenv "IPY_TEST_SIMPLE_PROMPT" "1")
-(setq python-shell-interpreter "ipython3"
-      python-shell-interpreter-args "-i")
-(setq elpy-modules (delq 'elpy-module-flymake elpy-modules))
-
-(add-hook 'elpy-mode-hook 'flycheck-mode)
-(setq flycheck-python-flake8-executable "flake8")
 
 
 (use-package py-autopep8
   :ensure t
+  :hook (elpy-mode-hook . py-autopep8-enable-on-save)
   )
 
-(add-hook 'elpy-mode-hook 'py-autopep8-enable-on-save)
+
 
 (use-package cython-mode
   :ensure t
@@ -179,11 +183,13 @@
 
 (use-package flycheck-cython
   :ensure t
+  :config
+  (add-hook 'cython-mode-hook 'flycheck-mode)
+  (setq flycheck-cython-executable "cython3")
+  (setq flycheck-cython-include-dir "~/Documents/workspace/openage/bin/") 
 )
 
-(add-hook 'cython-mode-hook 'flycheck-mode)
-(setq flycheck-cython-executable "cython3")
-(setq flycheck-cython-include-dir "~/Documents/workspace/openage/bin/") 
+
 
 (use-package neotree
   :ensure t
@@ -191,15 +197,17 @@
 
 (use-package js2-mode
   :ensure t
+  :hook (js2-mode-hook js2-imenu-extras-mode)
+  :config
+  (add-to-list 'auto-mode-alist '("\\.js\\'" . js2-mode))
 )
 
-(add-to-list 'auto-mode-alist '("\\.js\\'" . js2-mode))
-(add-hook 'js2-mode-hook #'js2-imenu-extras-mode)
+
 
 (use-package js-doc
-  :ensure t)
-
-(setq js-doc-mail-address "frankxlebrun@gmail.com"
+  :ensure t
+  :config
+  (setq js-doc-mail-address "frankxlebrun@gmail.com"
 		  js-doc-author (format "Francisco Ayala Le Brun <%s>" js-doc-mail-address)
 		  js-doc-url ""
 		  js-doc-license "")
@@ -209,14 +217,19 @@
 			  (define-key js2-mode-map "\C-ci" 'js-doc-insert-function-doc)
 			  (define-key js2-mode-map "@" 'js-doc-insert-tag)))
 
+  )
+
+
 
 (use-package js2-refactor
   :ensure t
-  )
-
-(add-hook 'js2-mode-hook #'js2-refactor-mode)
+  :config
+  (add-hook 'js2-mode-hook #'js2-refactor-mode)
 (js2r-add-keybindings-with-prefix "C-c C-r")
 (define-key js2-mode-map (kbd "C-k") #'js2r-kill)
+
+  )
+
 
 (use-package ag
   :ensure t
@@ -224,23 +237,27 @@
 
 (use-package xref-js2
   :ensure t
+  :config
+  (add-hook 'js2-mode-hook (lambda ()
+			   (add-hook 'xref-backend-functions #'xref-js2-xref-backend nil t)))
+  (define-key js-mode-map (kbd "M-.") nil)
   )
 
-(add-hook 'js2-mode-hook (lambda ()
-			   (add-hook 'xref-backend-functions #'xref-js2-xref-backend nil t)))
-(define-key js-mode-map (kbd "M-.") nil)
+
 	   
 
 (use-package company-tern
   :ensure t
+  :config
+  
+  (add-to-list 'company-backends 'company-tern)
+  (add-hook 'js2-mode-hook (lambda ()
+			     (tern-mode)
+			     (company-mode)))
+  (define-key tern-mode-keymap (kbd "M-.") nil)
+  (define-key tern-mode-keymap (kbd "M-,") nil)
   )
 
-(add-to-list 'company-backends 'company-tern)
-(add-hook 'js2-mode-hook (lambda ()
-				      (tern-mode)
-				      (company-mode)))
-(define-key tern-mode-keymap (kbd "M-.") nil)
-(define-key tern-mode-keymap (kbd "M-,") nil)
 
 
 
