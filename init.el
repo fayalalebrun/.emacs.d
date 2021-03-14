@@ -6,7 +6,7 @@
 (tool-bar-mode -1)
 (scroll-bar-mode -1)
 (toggle-truncate-lines)
-(add-to-list 'load-path "~/.emacs.d/lisp")
+(add-to-list 'load-path (expand-file-name "~/.emacs.d/lisp"))
 
 (require 'package)
 (add-to-list 'package-archives
@@ -21,9 +21,9 @@
        (package-install package)))
 
 
-(require 'cypher-mode)
-(load "~/.emacs.d/n4js")
-(setq n4js-cli-program "cypher-shell")
+
+
+
 
 (load "~/.emacs.d/js-doc")
 
@@ -33,6 +33,22 @@
 (require 'use-package)
 
 
+(use-package aweshell
+  :bind ([(control return)] . aweshell-dedicated-toggle)
+  )
+
+(use-package web-mode
+  :ensure t
+  :config
+  (add-to-list 'auto-mode-alist '("\\.phtml\\'" . web-mode))
+  (add-to-list 'auto-mode-alist '("\\.tpl\\.php\\'" . web-mode))
+  (add-to-list 'auto-mode-alist '("\\.[agj]sp\\'" . web-mode))
+  (add-to-list 'auto-mode-alist '("\\.as[cp]x\\'" . web-mode))
+  (add-to-list 'auto-mode-alist '("\\.erb\\'" . web-mode))
+  (add-to-list 'auto-mode-alist '("\\.mustache\\'" . web-mode))
+  (add-to-list 'auto-mode-alist '("\\.djhtml\\'" . web-mode))
+  (add-to-list 'auto-mode-alist '("\\.html\\'" . web-mode))
+  )
 
 (use-package xelb
   :ensure t
@@ -106,7 +122,14 @@
 
 (use-package flycheck
   :ensure t
+  :config
+  (flycheck-define-checker java-checkstyle
+    "Java checkstyle"
+    :command ("java" "-jar" "checkstyle-8.3.2-all.jar" "-c" "/sun_checks.xml" "-f" "xml" source)
+    :error-parser flycheck-parse-checkstyle
+    :modes (java-mode))
   )
+
 
 
 
@@ -195,12 +218,7 @@
   :ensure t
   )
 
-(use-package js2-mode
-  :ensure t
-  :hook (js2-mode-hook js2-imenu-extras-mode)
-  :config
-  (add-to-list 'auto-mode-alist '("\\.js\\'" . js2-mode))
-)
+
 
 
 
@@ -221,42 +239,14 @@
 
 
 
-(use-package js2-refactor
-  :ensure t
-  :config
-  (add-hook 'js2-mode-hook #'js2-refactor-mode)
-(js2r-add-keybindings-with-prefix "C-c C-r")
-(define-key js2-mode-map (kbd "C-k") #'js2r-kill)
 
-  )
 
 
 (use-package ag
   :ensure t
   )
 
-(use-package xref-js2
-  :ensure t
-  :config
-  (add-hook 'js2-mode-hook (lambda ()
-			   (add-hook 'xref-backend-functions #'xref-js2-xref-backend nil t)))
-  (define-key js-mode-map (kbd "M-.") nil)
-  )
 
-
-	   
-
-(use-package company-tern
-  :ensure t
-  :config
-  
-  (add-to-list 'company-backends 'company-tern)
-  (add-hook 'js2-mode-hook (lambda ()
-			     (tern-mode)
-			     (company-mode)))
-  (define-key tern-mode-keymap (kbd "M-.") nil)
-  (define-key tern-mode-keymap (kbd "M-,") nil)
-  )
 
 
 
@@ -299,6 +289,7 @@
   :ensure t
   :demand
   :config (add-to-list 'eglot-server-programs '(vhdl-mode . ("ghdl-ls")))
+  :config (add-to-list 'eglot-server-programs '(js-mode . ("typescript-language-server" "--stdio")))
 )
 
 (use-package toml-mode
@@ -324,13 +315,14 @@
   (emms-default-players)
   )
 
-(use-package shell-pop
-  :ensure t
-  )
 
 (use-package yasnippet
   :ensure t
   :config (yas-global-mode 1)
+  )
+
+(use-package ein
+  :ensure t
   )
 
 
@@ -338,6 +330,28 @@
   :bind (:map vhdl-mode-map
          ("C-c C-k" . fal-vhdl-ghdl-ae))
   )
+
+(use-package scala-mode
+  :ensure t
+  :interpreter
+  ("scala" . scala-mode))
+
+(use-package sbt-mode
+  :ensure t
+  :commands sbt-start sbt-command
+  :config
+  ;; WORKAROUND: allows using SPACE when in the minibuffer
+  (substitute-key-definition
+   'minibuffer-complete-word
+   'self-insert-command
+   minibuffer-local-completion-map))
+
+(use-package acme-mode
+  :config
+  (add-to-list 'auto-mode-alist '(".acme$" . acme-mode))
+  )
+
+
 
 
 (custom-set-variables
@@ -349,18 +363,21 @@
    [default default default italic underline success warning error])
  '(ansi-color-names-vector
    ["black" "red3" "ForestGreen" "yellow3" "blue" "magenta3" "DeepSkyBlue" "gray50"])
- '(custom-enabled-themes (quote (manoj-dark)))
+ '(custom-enabled-themes '(manoj-dark))
  '(ein:output-area-inlined-images t)
- '(org-export-backends (quote (ascii html icalendar latex md)))
+ '(highlight-indent-guides-method 'column)
+ '(org-export-backends '(ascii html icalendar latex md))
  '(package-selected-packages
-   (quote
-    (yasnippet yasnippet-snippets shell-pop typing helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode meghanada yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy use-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit)))
- '(shell-pop-shell-type
-   (quote
-    ("terminal" "*terminal*"
-     (lambda nil
-       (term shell-pop-term-shell)))))
- '(shell-pop-universal-key "<C-return>")
+   '(typit docker dockerfile-mode mermaid-mode csv-mode auctex web-mode sbt-mode scala-mode highlight-indent-guides volume yasnippet yasnippet-snippets typing helm-tramp exwm exwm-config xelb flycheck-rust cargo toml-mode company-lsp lsp-ui lsp-mode go-mode rust-mode elpygen ein gdscript-mode js3-mode markdown-preview-mode markdown-mode yaml-mode org htmlize js2-mode cypher-mode lua-mode nasm-mode org-download neotree cython-mode elpy use-package pdf-tools clang-format glsl-mode ## flycheck-rtags company-rtags helm-rtags flycheck company helm projectile rtags magit))
+ '(safe-local-variable-values
+   '((eval let
+	   ((root
+	     (projectile-project-root)))
+	   (let
+	       ((command
+		 (concat "arm-none-eabi-gdb -i=mi -ex \"target remote localhost:1234\" -ex \"symbol-file " root "src/kernel/build/kernel.sym\"")))
+	     (setq-local gud-gud-gdb-command-name command)
+	     (setq-local gud-gdb-command-name command)))))
  '(vhdl-upper-case-attributes t)
  '(vhdl-upper-case-keywords t)
  '(vhdl-upper-case-types t))

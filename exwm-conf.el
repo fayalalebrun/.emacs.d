@@ -28,7 +28,7 @@
 
 
 ;; Set the initial number of workspaces (they can also be created later).
-(setq exwm-workspace-number 9)
+(setq exwm-workspace-number 10)
 
 ;; All buffers created in EXWM mode are named "*EXWM*". You may want to
 ;; change it in `exwm-update-class-hook' and `exwm-update-title-hook', which
@@ -117,3 +117,10 @@
 ;; ready.  You can put it _anywhere_ in your configuration.
 (exwm-enable)
 
+(require 'exwm-randr)
+(setq exwm-randr-workspace-monitor-plist '(10 "eDP-1"))
+(add-hook 'exwm-randr-screen-change-hook
+          (lambda ()
+            (start-process-shell-command
+             "sh" nil "xrandr --output DP-1-1 --output eDP-1 --auto && xrandr | grep -q 'DP-1-1 connected 2560x1440+0+0 (normal left inverted right x axis y axis) .' && xrandr --output eDP-1 --off")))
+(exwm-randr-enable)
