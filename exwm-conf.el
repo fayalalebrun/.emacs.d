@@ -115,7 +115,7 @@
 
 ;; Do not forget to enable EXWM. It will start by itself when things are
 ;; ready.  You can put it _anywhere_ in your configuration.
-(exwm-enable)
+;; (exwm-enable)
 
 (require 'exwm-randr)
 (setq exwm-randr-workspace-monitor-plist '(10 "eDP-1"))

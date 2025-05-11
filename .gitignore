@@ -21,3 +21,9 @@ tramp
 /var/pcache
 custom.el
 el-get/
+transient/
+emms/
+eln-cache
+diary
+quelpa/
+tree-sitter/
