@@ -39,6 +39,9 @@
   :quelpa (typst-ts-mode :fetcher codeberg :repo "meow_king/typst-ts-mode")
   :mode (("\\.typ\\'" . typst-ts-mode)))
 
+(use-package nix-ts-mode
+ :mode "\\.nix\\'")
+
 (use-package typst-preview 
   :quelpa (typst-preview :fetcher github :repo "havarddj/typst-preview.el"))
 
