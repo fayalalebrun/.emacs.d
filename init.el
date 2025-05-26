@@ -40,6 +40,7 @@
   :mode (("\\.typ\\'" . typst-ts-mode)))
 
 (use-package nix-ts-mode
+ :ensure t
  :mode "\\.nix\\'")
 
 (use-package typst-preview 
