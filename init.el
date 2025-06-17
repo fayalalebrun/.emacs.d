@@ -45,7 +45,8 @@
 
 (use-package scala-ts-mode
   :ensure t
-  :mode "\\.scala\\'")
+  :mode (("\\.scala\\'" . scala-ts-mode)
+         ("\\.sbt\\'" . scala-ts-mode)))
 
 (use-package typst-preview 
   :quelpa (typst-preview :fetcher github :repo "havarddj/typst-preview.el"))
