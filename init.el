@@ -404,7 +404,8 @@
 	 (vhdl-mode . lsp-deferred)
 	 (typst-ts-mode . lsp-deferred)
 	 (typescript-ts-mode . lsp-deferred)
-	 (tsx-ts-mode . lsp-deferred))
+	 (tsx-ts-mode . lsp-deferred)
+	 (python-ts-mode . lsp-deferred))
   :commands lsp
   :bind (:map lsp-mode-map (("C-l n" . flycheck-next-error)
 			    ("C-l p" . flycheck-previous-error)
