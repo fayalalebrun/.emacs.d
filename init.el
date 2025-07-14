@@ -546,6 +546,17 @@
   (aidermacs-architect-model "openrouter/deepseek/deepseek-r1")
   )
 
+(use-package eat
+  :ensure t
+  )
+
+(use-package claude-code
+  :ensure t
+  :quelpa (claude-code :fetcher github :repo "stevemolitor/claude-code.el")
+  :config (claude-code-mode)
+  :bind-keymap ("C-c c" . claude-code-command-map)
+  )
+
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
