@@ -546,6 +546,7 @@
   (aidermacs-architect-model "openrouter/deepseek/deepseek-r1")
   )
 
+
 (use-package eat
   :ensure t
   )
@@ -555,6 +556,17 @@
   :quelpa (claude-code :fetcher github :repo "stevemolitor/claude-code.el")
   :config (claude-code-mode)
   :bind-keymap ("C-c c" . claude-code-command-map)
+  )
+
+
+(use-package pg
+  :quelpa (pg :fetcher github :repo "emarsden/pg-el")
+  )
+
+(use-package pgmacs
+  :after pg
+  :quelpa (pgmacs :fetcher github :repo "emarsden/pgmacs")
+
   )
 
 (custom-set-variables
