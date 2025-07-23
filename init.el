@@ -281,6 +281,12 @@
     (define-key projectile-mode-map (kbd "C-c p") 'projectile-command-map)
     ))
 
+(use-package helm-projectile
+  :ensure t
+  :after (helm projectile)
+  :config
+  (helm-projectile-on))
+
 (use-package platformio-mode
   :ensure t
   :config
