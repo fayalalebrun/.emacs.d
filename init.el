@@ -236,8 +236,15 @@
 	("C-x C-f" . helm-find-files)
 	("C-s" . helm-occur)
 	("C-x C-b" . helm-buffers-list))
-  )
-
+  :config
+  ;; Prevent helm from interfering with eat terminals
+  ;; Split inside current window to preserve layout
+  (setq helm-split-window-inside-p t)
+  ;; Always split below within the current window
+  (setq helm-split-window-default-side 'below)
+  ;; Reduce helm window height
+  (setq helm-display-buffer-default-height 15)
+)
 
 (use-package helm-tramp
   :ensure t
