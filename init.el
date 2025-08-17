@@ -565,9 +565,23 @@
   )
 
 (use-package claude-code
-  :ensure t
   :quelpa (claude-code :fetcher github :repo "stevemolitor/claude-code.el")
-  :config (claude-code-mode)
+  :init
+  ;; Set notification settings BEFORE the package is loaded
+  (defun my-claude-notify (title message)
+    "Display a Linux notification using notify-send."
+    (if (executable-find "notify-send")
+        (call-process "notify-send" nil nil nil
+                      "-i" "dialog-information"
+                      "-t" "0"
+                      title message)
+      (message "%s: %s" title message))
+    (message "%s: %s" title message))
+
+  (setq claude-code-notification-function #'my-claude-notify)
+  (setq claude-code-enable-notifications t)
+  :config
+  (claude-code-mode)
   :bind-keymap ("C-c c" . claude-code-command-map)
   )
 
