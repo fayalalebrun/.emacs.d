@@ -372,6 +372,10 @@
 
 (use-package ein
   :ensure t
+  :config
+  (setq ein:use-auto-complete-superpack t)
+  (setq ein:jupyter-default-server-command "jupyter")
+  (setq ein:jupyter-server-args '("--no-browser" "--NotebookApp.token=''" "--NotebookApp.password=''" "--NotebookApp.disable_check_xsrf=True"))
   )
 
 
