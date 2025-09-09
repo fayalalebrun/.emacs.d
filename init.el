@@ -370,13 +370,49 @@
   (setq yas-snippet-dir "~/.emacs.d/snippets")
   )
 
-(use-package ein
+;; Use IPython for better matplotlib support
+(use-package python
+  :config
+  ;; Use IPython if available
+  (when (executable-find "ipython")
+    (setq python-shell-interpreter "ipython"
+          python-shell-interpreter-args "-i --simple-prompt --InteractiveShell.display_page=True"
+          ;; Disable native completion to prevent conflicts
+          python-shell-completion-native-enable nil
+          ;; Disable the warning about prompt detection failures
+          python-shell-prompt-detect-failure-warning nil
+          ;; Fix prompt detection for IPython simple-prompt
+          python-shell-prompt-regexp "In \\[[0-9]+\\]: "
+          python-shell-prompt-output-regexp "Out\\[[0-9]+\\]: "
+          python-shell-prompt-block-regexp "[.][.][.]+: "
+          ;; Alternative input regexps for better detection
+          python-shell-prompt-input-regexps '("In \\[[0-9]+\\]: " "[.][.][.]+: ")
+          python-shell-prompt-output-regexps '("Out\\[[0-9]+\\]: ")
+          ;; Additional completion configuration
+          python-shell-completion-setup-code "from IPython.core.completerlib import module_completion"
+          python-shell-completion-module-string-code "';'.join(module_completion('''%s'''))\n"
+          python-shell-completion-string-code "';'.join(get_ipython().Completer.all_completions('''%s'''))\n"))
+  ;; Set environment variables for better IPython compatibility  
+  (setenv "IPY_TEST_SIMPLE_PROMPT" "1")
+  (setenv "JUPYTER_CONSOLE_TEST" "1"))
+
+;; comint-mime for inline image display
+(use-package comint-mime
+  :ensure t
+  :hook (inferior-python-mode . comint-mime-setup))
+
+(use-package code-cells
   :ensure t
   :config
-  (setq ein:use-auto-complete-superpack t)
-  (setq ein:jupyter-default-server-command "jupyter")
-  (setq ein:jupyter-server-args '("--no-browser" "--NotebookApp.token=''" "--NotebookApp.password=''" "--NotebookApp.disable_check_xsrf=True"))
-  )
+  ;; Use jupytext for ipynb conversion (requires jupytext to be installed)
+  (setq code-cells-convert-ipynb-style '(("jupytext" "--to" "py:percent") ("jupytext" "--to" "ipynb")))
+  ;; Support both Jupytext formats: light (# +) and percent (# %%)
+  (setq code-cells-boundary-regexp "^# \\+\\|^# %%\\|^#%%")
+  :hook ((python-mode python-ts-mode) . code-cells-mode-maybe)
+  :bind (:map code-cells-mode-map
+         ("C-c C-c" . code-cells-eval)
+         ("C-c C-n" . code-cells-forward-cell)
+         ("C-c C-p" . code-cells-backward-cell)))
 
 
 (use-package fal-vhdl
@@ -600,6 +636,32 @@
 
   )
 
+(use-package prodigy
+  :ensure t)
+
+(use-package hydra
+  :ensure t)
+
+(defun reload-config ()
+  "Reload init.el and all files in the lisp directory."
+  (interactive)
+  (message "Reloading configuration...")
+  
+  ;; Reload all .el files in lisp directory
+  (let ((lisp-dir "~/.emacs.d/lisp/"))
+    (when (file-directory-p lisp-dir)
+      (dolist (file (directory-files lisp-dir t "\\.el$"))
+        (message "Reloading %s" (file-name-nondirectory file))
+        (load-file file))))
+  
+  ;; Reload init.el
+  (message "Reloading init.el")
+  (load-file "~/.emacs.d/init.el")
+  
+  (message "Configuration reloaded successfully!"))
+
+(require 'workspace-utils)
+
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
  ;; If you edit it by hand, you could mess it up, so be careful.
@@ -703,7 +765,6 @@
      (tramp-connection-local-default-system-profile
       (path-separator . ":") (null-device . "/dev/null"))))
  '(custom-enabled-themes '(manoj-dark))
- '(ein:output-area-inlined-images t)
  '(eldoc-echo-area-use-multiline-p 5)
  '(eldoc-minor-mode-string nil)
  '(ement-initial-sync-timeout 3000)
