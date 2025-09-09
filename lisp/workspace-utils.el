@@ -35,6 +35,43 @@
 (require 'hydra)
 (require 'cl-lib)
 
+;; Buffer name format constants
+(defconst workspace-arduino-shell-buffer-format "*Arduino Shell - %s*"
+  "Format string for Arduino shell buffer names.")
+(defconst workspace-prodigy-buffer-format "*prodigy-%s*"
+  "Format string for prodigy buffer names.")
+(defconst workspace-mock-robots-buffer-format "*Mock Robots - %s*"
+  "Format string for mock robots buffer names.")
+
+;; Prodigy workspace isolation workaround
+(defvar workspace-current-prodigy-buffer-name "*prodigy*"
+  "Current workspace-specific prodigy buffer name.")
+
+(defun workspace-prodigy-buffer-name-override ()
+  "Return the current workspace-specific prodigy buffer name."
+  workspace-current-prodigy-buffer-name)
+
+;; Override prodigy's hardcoded buffer name
+(advice-add 'prodigy-buffer :override 
+            (lambda () (get-buffer workspace-current-prodigy-buffer-name)))
+
+(advice-add 'prodigy-buffer-visible-p :override
+            (lambda () 
+              (-any? (lambda (window)
+                       (equal (window-buffer window) (get-buffer workspace-current-prodigy-buffer-name)))
+                     (window-list))))
+
+;; Override the main prodigy function to use our buffer name
+(defun workspace-prodigy-with-custom-buffer ()
+  "Start prodigy with workspace-specific buffer name."
+  (let ((buffer (get-buffer-create workspace-current-prodigy-buffer-name)))
+    (with-current-buffer buffer
+      (unless (eq major-mode 'prodigy-mode)
+        (prodigy-mode))
+      (when (fboundp 'prodigy-start-status-check-timer)
+        (prodigy-start-status-check-timer)))
+    (pop-to-buffer buffer)))
+
 ;;;###autoload
 (defun workspace-create-nix-ipython-interpreter (project-root)
   "Create a proper IPython interpreter configuration for nix shell."
@@ -117,9 +154,9 @@
 
       
       
-      ;; Start prodigy with project-specific buffer name
-      (let ((prodigy-buffer-name (format "*prodigy-%s*" workspace-name)))
-        (prodigy))
+      ;; Set workspace-specific prodigy buffer name and start prodigy
+      (setq workspace-current-prodigy-buffer-name (format workspace-prodigy-buffer-format workspace-name))
+      (workspace-prodigy-with-custom-buffer)
       
       (message "Workspace services configured for %s" workspace-name))))
 
@@ -191,7 +228,7 @@
             ;; Associate this buffer with the IPython process
             (setq-local python-shell-buffer-name python-buffer-name)
             
-            (message "Notebook %s ready with IPython: %s" notebook-name python-buffer-name))))))
+            (message "Notebook %s ready with IPython: %s" notebook-name python-buffer-name)))))))
 
 ;;;###autoload
 (defun workspace-switch-to-notebook-ipython ()
@@ -238,7 +275,7 @@
          (t (message "No IPython buffer found for %s. Use C-c m n to start one." notebook-name)))))
      
      ;; Otherwise, not in a notebook-related buffer
-     (t (message "Not in a notebook or IPython buffer"))))
+     (t (message "Not in a notebook or IPython buffer")))))
 
 ;; Add keybinding for quick switching
 (defun workspace-setup-notebook-keybindings ()
@@ -270,6 +307,7 @@
   ("m" workspace-start-mock-robots "mock robots") 
   ("l" workspace-list-machines-for-system "list machines")
   ("a" workspace-arduino-shell "arduino cli")
+  ("k" workspace-shutdown-all "shutdown all")
   ("q" nil "quit"))
 
 ;; Define main keybinding for hydra
@@ -282,10 +320,11 @@
   (if (not (and (featurep 'projectile) (projectile-project-p)))
       (message "Not in a projectile project")
     (let* ((project-root (projectile-project-root))
+           (workspace-name (projectile-project-name))
            (arduino-path (concat project-root "ctrl/only")))
       (if (file-directory-p arduino-path)
           (let ((default-directory arduino-path)
-                (shell-buffer-name "*Arduino Shell*"))
+                (shell-buffer-name (format workspace-arduino-shell-buffer-format workspace-name)))
             (message "Starting Arduino CLI shell at %s" arduino-path)
             ;; Start bash shell and send nix-shell command
             (let ((explicit-shell-file-name "bash"))
@@ -417,7 +456,7 @@
         (let* ((arcade-path (concat project-root "arcade"))
                (robot-args (mapconcat 'shell-quote-argument robot-systems " "))
                (command (format "nix run .#start-arcade -- --mock-standalone --speedup %s %s" speedup robot-args))
-               (buffer-name (format "*Mock Robots - %s*" (mapconcat 'identity robot-systems ", "))))
+               (buffer-name (format workspace-mock-robots-buffer-format (mapconcat 'identity robot-systems ", "))))
           (if (file-exists-p arcade-path)
               (progn
                 (require 'eat)
@@ -428,7 +467,61 @@
                       (rename-buffer buffer-name))
                     (switch-to-buffer buffer-name)))
                 (message "Mock robots started: %s" (mapconcat 'identity robot-systems ", ")))
-            (message "Arcade directory %s not found" arcade-path))))))))
+            (message "Arcade directory %s not found" arcade-path)))))))
+
+;;;###autoload
+(defun workspace-shutdown-all ()
+  "Shutdown all workspace processes including prodigy services and eat buffers."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (workspace-name (if (and (featurep 'projectile) (projectile-project-p))
+                              (projectile-project-name)
+                            (file-name-nondirectory (directory-file-name project-root))))
+           (stopped-services 0)
+           (killed-buffers 0))
+      
+      ;; Stop prodigy services - manually stop each service
+      (let ((prodigy-buffer-name (format workspace-prodigy-buffer-format workspace-name)))
+        (when (get-buffer prodigy-buffer-name)
+          (setq stopped-services (length prodigy-services))
+          ;; Manually stop each service since prodigy-stop-all might not work with our buffer override
+          (dolist (service prodigy-services)
+            (when (plist-get service :process)
+              (prodigy-stop-service service)))
+          ;; Also try the standard prodigy-stop-all as backup
+          (when (fboundp 'prodigy-stop-all)
+            (prodigy-stop-all))))
+      
+      ;; Kill buffers related to THIS workspace only
+      (dolist (buffer (buffer-list))
+        (let ((buffer-name (buffer-name buffer)))
+          (when (and buffer-name  ; Check buffer-name is not nil
+                     (or 
+                      ;; Mock Robots buffers (contain project-specific system names)
+                      (string-match "\\*Mock Robots" buffer-name)
+                      ;; Arduino Shell buffer for this workspace
+                      (string-equal buffer-name (format workspace-arduino-shell-buffer-format workspace-name))
+                      ;; Prodigy buffer for this workspace
+                      (string-equal buffer-name (format workspace-prodigy-buffer-format workspace-name))
+                      ;; IPython buffers from this workspace's notebooks
+                      (and (string-match "\\*IPython\\[.*\\]\\*" buffer-name)
+                           (with-current-buffer buffer
+                             (and (boundp 'default-directory)
+                                  (string-prefix-p project-root default-directory))))))
+            (when (buffer-live-p buffer)
+              ;; For shell buffers, try to kill the process first
+              (when (string-match "\\*Arduino Shell\\*\\|\\*Mock Robots" buffer-name)
+                (with-current-buffer buffer
+                  (when (and (boundp 'comint-process-echoes)
+                            (get-buffer-process buffer))
+                    (delete-process (get-buffer-process buffer)))))
+              (kill-buffer buffer)
+              (setq killed-buffers (1+ killed-buffers))))))
+      
+      (message "Workspace shutdown complete: stopped %d services, killed %d buffers" 
+               stopped-services killed-buffers))))
 
 
 ;;;###autoload
@@ -467,7 +560,7 @@
                  (t (message "No clipboard utility found (need xclip or wl-copy)")))
               (message "Image file %s not found" file)))
            (t (message "The image seems to be malformed."))))
-      (message "Point is not at an image.")))))
+      (message "Point is not at an image."))))
 
 ;; Add keybinding for copying images
 (defun workspace-setup-image-keybindings ()
