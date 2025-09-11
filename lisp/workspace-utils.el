@@ -128,8 +128,20 @@
       ;; Add vision-shell service
       (prodigy-define-service
         :name "calibration_service"
-        :command "calibration_service"
+        :command "nix"
+        :args '("shell" "--impure" ".#vision.dev-shell" "--command" "calibration_service")
+        :cwd workspace-path
         :tags '(workspace vision))
+      
+      (prodigy-define-service
+        :name "calibration service proxy"
+        :command "/home/francisco/grpcwebproxy/grpcwebproxy-v0.15.0-linux-x86_64"
+        :args '("--backend_addr" "localhost:6001" 
+                "--run_tls_server=false" 
+                "--server_http_debug_port" "9900" 
+                "--server_http_max_read_timeout=300s" 
+                "--server_http_max_write_timeout=300s")
+        :tags '(workspace vision proxy))
       
       (prodigy-define-service
         :name "portico"
@@ -307,11 +319,26 @@
   ("m" workspace-start-mock-robots "mock robots") 
   ("l" workspace-list-machines-for-system "list machines")
   ("a" workspace-arduino-shell "arduino cli")
+  ("y" workspace-yarn-install "yarn install")
   ("k" workspace-shutdown-all "shutdown all")
   ("q" nil "quit"))
 
 ;; Define main keybinding for hydra
 (global-set-key (kbd "C-c m") 'hydra-workspace/body)
+
+;;;###autoload
+(defun workspace-yarn-install ()
+  "Run yarn install in the portico directory."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (portico-path (concat project-root "portico")))
+      (if (file-directory-p portico-path)
+          (let ((default-directory portico-path))
+            (message "Running yarn install in %s" portico-path)
+            (async-shell-command "yarn install" "*yarn install*"))
+        (message "Portico directory %s not found" portico-path)))))
 
 ;;;###autoload
 (defun workspace-arduino-shell ()
