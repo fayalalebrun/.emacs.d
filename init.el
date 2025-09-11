@@ -294,6 +294,49 @@
   :config
   (helm-projectile-on))
 
+(use-package deadgrep
+  :ensure t
+  :bind (("C-c g" . deadgrep)
+         ("C-c G" . deadgrep-kill-all-buffers))
+  :config
+  ;; Always use current directory by default
+  (setq deadgrep-project-root-function 
+        (lambda () default-directory))
+  ;; Better ripgrep flags for large codebases
+  (setq deadgrep-extra-arguments '("--follow" "--smart-case" "--max-columns=150"))
+  ;; Enable useful features
+  (setq deadgrep-display-buffer-function 'switch-to-buffer-other-window)
+  ;; Add project-wide search shortcut
+  (defun deadgrep-in-project ()
+    "Run deadgrep in project root."
+    (interactive)
+    (if (and (featurep 'projectile) (projectile-project-p))
+        (let ((deadgrep-project-root-function 
+               (lambda () (projectile-project-root))))
+          (call-interactively 'deadgrep))
+      (call-interactively 'deadgrep)))
+  :bind (:map projectile-mode-map
+         ("C-c p s d" . deadgrep-in-project)))
+
+(use-package ace-window
+  :ensure t
+  :bind (("M-o" . ace-window)
+         ("C-x o" . ace-window))  ; Replace other-window entirely
+  :config
+  ;; Use home row for better ergonomics  
+  (setq aw-keys '(?a ?s ?d ?f ?g ?h ?j ?k ?l))
+  ;; Don't always dispatch - allow auto-switch with 2 windows
+  (setq aw-dispatch-always nil)
+  ;; Larger overlay for better visibility
+  (setq aw-background t)
+  ;; Auto-switch when 3 or fewer windows (no selection needed)
+  (setq aw-dispatch-when-more-than 3)
+  ;; Make letters much more visible
+  (custom-set-faces
+   '(aw-leading-char-face
+     ((t (:foreground "red" :background "black" :weight bold :height 3.0)))))
+)
+
 (use-package platformio-mode
   :ensure t
   :config
@@ -602,7 +645,19 @@
 
 (use-package eat
   :ensure t
-  )
+  :config
+  ;; Fix M-o (ace-window) keybinding conflicts in eat buffers
+  ;; Use add-to-list to ensure the key is actually added
+  (add-to-list 'eat-semi-char-non-bound-keys [?\e ?o])
+  
+  ;; Also try adding the alternative formats just in case
+  (add-to-list 'eat-semi-char-non-bound-keys [?\M-o])
+  
+  ;; Update keymap after modifying the list
+  (eat-update-semi-char-mode-map)
+  
+  ;; Force direct binding as backup
+  (define-key eat-semi-char-mode-map (kbd "M-o") 'ace-window))
 
 (use-package claude-code
   :quelpa (claude-code :fetcher github :repo "stevemolitor/claude-code.el")
