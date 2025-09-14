@@ -697,6 +697,11 @@
 (use-package hydra
   :ensure t)
 
+(use-package shell-command-x
+  :ensure t
+  :config
+  (shell-command-x-mode 1))
+
 (defun reload-config ()
   "Reload init.el and all files in the lisp directory."
   (interactive)
