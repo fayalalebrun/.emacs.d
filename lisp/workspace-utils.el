@@ -38,39 +38,8 @@
 ;; Buffer name format constants
 (defconst workspace-arduino-shell-buffer-format "*Arduino Shell - %s*"
   "Format string for Arduino shell buffer names.")
-(defconst workspace-prodigy-buffer-format "*prodigy-%s*"
-  "Format string for prodigy buffer names.")
 (defconst workspace-mock-robots-buffer-format "*Mock Robots - %s*"
   "Format string for mock robots buffer names.")
-
-;; Prodigy workspace isolation workaround
-(defvar workspace-current-prodigy-buffer-name "*prodigy*"
-  "Current workspace-specific prodigy buffer name.")
-
-(defun workspace-prodigy-buffer-name-override ()
-  "Return the current workspace-specific prodigy buffer name."
-  workspace-current-prodigy-buffer-name)
-
-;; Override prodigy's hardcoded buffer name
-(advice-add 'prodigy-buffer :override 
-            (lambda () (get-buffer workspace-current-prodigy-buffer-name)))
-
-(advice-add 'prodigy-buffer-visible-p :override
-            (lambda () 
-              (-any? (lambda (window)
-                       (equal (window-buffer window) (get-buffer workspace-current-prodigy-buffer-name)))
-                     (window-list))))
-
-;; Override the main prodigy function to use our buffer name
-(defun workspace-prodigy-with-custom-buffer ()
-  "Start prodigy with workspace-specific buffer name."
-  (let ((buffer (get-buffer-create workspace-current-prodigy-buffer-name)))
-    (with-current-buffer buffer
-      (unless (eq major-mode 'prodigy-mode)
-        (prodigy-mode))
-      (when (fboundp 'prodigy-start-status-check-timer)
-        (prodigy-start-status-check-timer)))
-    (pop-to-buffer buffer)))
 
 ;;;###autoload
 (defun workspace-create-nix-ipython-interpreter (project-root)
@@ -129,7 +98,7 @@
       (prodigy-define-service
         :name "calibration_service"
         :command "nix"
-        :args '("shell" "--impure" ".#vision.dev-shell" "--command" "calibration_service")
+        :args '("run" ".#calibration-service")
         :cwd workspace-path
         :tags '(workspace vision))
       
@@ -157,18 +126,10 @@
 	:cwd "~/sources/atrium-linux"
         :tags '(workspace vision))
 
-      (prodigy-define-service
-        :name "jupytext-sync"
-        :command "nix"
-        :args '("shell" "--impure" ".#vision.dev-shell" "--command" "watchexec" "--restart" "--exts" "ipynb,py" "--watch" "vision/experimental/notebooks" "--" "jupytext" "--sync" "vision/experimental/notebooks/*.ipynb")
-        :cwd workspace-path
-        :tags '(workspace jupytext))
-
       
       
-      ;; Set workspace-specific prodigy buffer name and start prodigy
-      (setq workspace-current-prodigy-buffer-name (format workspace-prodigy-buffer-format workspace-name))
-      (workspace-prodigy-with-custom-buffer)
+      ;; Start prodigy
+      (prodigy)
       
       (message "Workspace services configured for %s" workspace-name))))
 
@@ -231,7 +192,7 @@
                  (default-directory project-root)
                  ;; Use nix shell wrapper but call ipython directly for better prompt detection
                  (python-shell-interpreter "nix")
-                 (python-shell-interpreter-args "--quiet --no-warn-dirty shell --impure .#vision.dev-shell --command ipython -i --simple-prompt")
+                 (python-shell-interpreter-args "--quiet --no-warn-dirty shell --impure .#vision.dev-shell --command bash -c \"export PATH=/nix/store/30mhlcmz2p60rjgih2c3760zjc42g5m7-rerun-0.22.1/bin:$PATH && ipython -i --simple-prompt\"")
                  (python-shell-buffer-name python-buffer-name))
             
             ;; Start IPython in vision environment
@@ -311,17 +272,51 @@
         (shell-command "nix shell --impure .#vision.dev-shell --command true")
         (message "Vision environment reloaded! You may need to restart Python processes.")))))
 
-;; Workspace hydra - simple and clean
+;;;###autoload
+(defun workspace-generate-proto ()
+  "Run nix run .#generate-proto in the project root."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (default-directory project-root))
+      (message "Generating proto files...")
+      (async-shell-command "nix run .#generate-proto" "*Generate Proto*"))))
+
+;;;###autoload
+(defun workspace-pyright-check ()
+  "Run pyright in the vision directory within the vision shell."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (vision-path (concat project-root "vision"))
+           (default-directory vision-path))
+      (if (file-directory-p vision-path)
+          (progn
+            (message "Running pyright in vision directory...")
+            (async-shell-command "nix shell --impure ../.#vision.dev-shell --command pyright" "*Pyright Check*"))
+        (message "Vision directory %s not found" vision-path)))))
+
+;; Workspace hydra - organized in four columns
 (defhydra hydra-workspace (:color blue)
-  "Workspace Tools"
-  ("s" workspace-setup-prodigy "setup prodigy")
-  ("n" workspace-open-notebook "notebook + ipython")
-  ("m" workspace-start-mock-robots "mock robots") 
-  ("l" workspace-list-machines-for-system "list machines")
-  ("a" workspace-arduino-shell "arduino cli")
-  ("y" workspace-yarn-install "yarn install")
-  ("k" workspace-shutdown-all "shutdown all")
-  ("q" nil "quit"))
+  "
+^Setup^               ^Development^        ^Code Tools^         ^Utilities^
+_s_: setup prodigy    _n_: notebook        _g_: generate proto  _l_: list machines
+_r_: quick start      _a_: arduino cli     _p_: pyright check   _k_: shutdown all
+_m_: mock robots      _y_: yarn install                         _q_: quit
+"
+  ("s" workspace-setup-prodigy)
+  ("r" workspace-quick-start)
+  ("m" workspace-start-mock-robots)
+  ("n" workspace-open-notebook)
+  ("a" workspace-arduino-shell)
+  ("y" workspace-yarn-install)
+  ("g" workspace-generate-proto)
+  ("p" workspace-pyright-check)
+  ("l" workspace-list-machines-for-system)
+  ("k" workspace-shutdown-all)
+  ("q" nil))
 
 ;; Define main keybinding for hydra
 (global-set-key (kbd "C-c m") 'hydra-workspace/body)
@@ -509,17 +504,13 @@
            (stopped-services 0)
            (killed-buffers 0))
       
-      ;; Stop prodigy services - manually stop each service
-      (let ((prodigy-buffer-name (format workspace-prodigy-buffer-format workspace-name)))
-        (when (get-buffer prodigy-buffer-name)
-          (setq stopped-services (length prodigy-services))
-          ;; Manually stop each service since prodigy-stop-all might not work with our buffer override
-          (dolist (service prodigy-services)
-            (when (plist-get service :process)
-              (prodigy-stop-service service)))
-          ;; Also try the standard prodigy-stop-all as backup
-          (when (fboundp 'prodigy-stop-all)
-            (prodigy-stop-all))))
+      ;; Stop prodigy services
+      (when (get-buffer "*prodigy*")
+        (setq stopped-services (length prodigy-services))
+        ;; Stop all prodigy services
+        (dolist (service prodigy-services)
+          (when (prodigy-service-started-p service)
+            (prodigy-stop-service service))))
       
       ;; Kill buffers related to THIS workspace only
       (dolist (buffer (buffer-list))
@@ -530,8 +521,8 @@
                       (string-match "\\*Mock Robots" buffer-name)
                       ;; Arduino Shell buffer for this workspace
                       (string-equal buffer-name (format workspace-arduino-shell-buffer-format workspace-name))
-                      ;; Prodigy buffer for this workspace
-                      (string-equal buffer-name (format workspace-prodigy-buffer-format workspace-name))
+                      ;; Prodigy buffer
+                      (string-equal buffer-name "*prodigy*")
                       ;; IPython buffers from this workspace's notebooks
                       (and (string-match "\\*IPython\\[.*\\]\\*" buffer-name)
                            (with-current-buffer buffer
@@ -550,6 +541,46 @@
       (message "Workspace shutdown complete: stopped %d services, killed %d buffers" 
                stopped-services killed-buffers))))
 
+;;;###autoload
+(defun workspace-quick-start ()
+  "Quick start: setup prodigy with all services and start mock robots with default settings."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (workspace-name (projectile-project-name)))
+      (message "Quick starting workspace: %s" workspace-name)
+      
+      ;; Setup prodigy services
+      (workspace-setup-prodigy)
+      
+      ;; Start all prodigy services after a brief delay to ensure prodigy is ready
+      (run-with-timer 1 nil
+                      (lambda ()
+                        (dolist (service prodigy-services)
+                          (unless (prodigy-service-started-p service)
+                            (prodigy-start-service service)))
+                        (message "All prodigy services started")))
+      
+      ;; Start mock robots with default settings (Pisa 2, Petra 3, Panama 2, speedup 1)
+      (let* ((default-robots '("Pisa 2" "Petra 3" "Panama 2"))
+             (speedup "1")
+             (arcade-path (concat project-root "arcade"))
+             (robot-args (mapconcat 'shell-quote-argument default-robots " "))
+             (command (format "nix run .#start-arcade -- --mock-standalone --speedup %s %s" speedup robot-args))
+             (buffer-name (format workspace-mock-robots-buffer-format (mapconcat 'identity default-robots ", "))))
+        (if (file-exists-p arcade-path)
+            (progn
+              (require 'eat)
+              (let ((default-directory arcade-path))
+                (let ((eat-buffer (eat)))
+                  (with-current-buffer eat-buffer
+                    (process-send-string (get-buffer-process eat-buffer) (concat command "; exit\n"))
+                    (rename-buffer buffer-name))))
+              (message "Mock robots started: %s" (mapconcat 'identity default-robots ", ")))
+          (message "Arcade directory %s not found" arcade-path)))
+      
+      (message "Quick start complete: prodigy services and mock robots running"))))
 
 ;;;###autoload
 (defun workspace-copy-image-to-clipboard ()
