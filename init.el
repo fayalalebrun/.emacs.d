@@ -631,17 +631,6 @@
   :ensure t
   :hook (after-init . envrc-global-mode))
 
-(use-package aidermacs
-  :ensure t
-  :bind (("C-c a" . aidermacs-transient-menu))
-  :config
-  :custom
-  ; See the Configuration section below
-  (aidermacs-use-architect-mode t)
-  (aidermacs-default-model "sonnet")
-  (aidermacs-architect-model "openrouter/deepseek/deepseek-r1")
-  )
-
 
 (use-package eat
   :ensure t
