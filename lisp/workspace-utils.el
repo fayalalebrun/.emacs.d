@@ -41,6 +41,11 @@
 (defconst workspace-mock-robots-buffer-format "*Mock Robots - %s*"
   "Format string for mock robots buffer names.")
 
+;; Variables for remembering last inputs
+(defvar workspace-integration-test-history nil
+  "History list for integration test names.
+Add this to your init.el to persist across sessions: (savehist-mode 1)")
+
 ;;;###autoload
 (defun workspace-create-nix-ipython-interpreter (project-root)
   "Create a proper IPython interpreter configuration for nix shell."
@@ -298,25 +303,41 @@
             (async-shell-command "nix shell --impure ../.#vision.dev-shell --command pyright" "*Pyright Check*"))
         (message "Vision directory %s not found" vision-path)))))
 
-;; Workspace hydra - organized in four columns
-(defhydra hydra-workspace (:color blue)
-  "
-^Setup^               ^Development^        ^Code Tools^         ^Utilities^
-_s_: setup prodigy    _n_: notebook        _g_: generate proto  _l_: list machines
-_r_: quick start      _a_: arduino cli     _p_: pyright check   _k_: shutdown all
-_m_: mock robots      _y_: yarn install                         _q_: quit
-"
-  ("s" workspace-setup-prodigy)
-  ("r" workspace-quick-start)
-  ("m" workspace-start-mock-robots)
-  ("n" workspace-open-notebook)
-  ("a" workspace-arduino-shell)
-  ("y" workspace-yarn-install)
-  ("g" workspace-generate-proto)
-  ("p" workspace-pyright-check)
-  ("l" workspace-list-machines-for-system)
-  ("k" workspace-shutdown-all)
-  ("q" nil))
+;;;###autoload
+(defun workspace-run-integration-test ()
+  "Run integration tests with specified test name and optional --inspect-brk flag."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (default-value (car workspace-integration-test-history))
+           (test-name (read-string "Test name: " 
+                                  default-value
+                                  'workspace-integration-test-history
+                                  default-value))
+           (use-inspect-brk (y-or-n-p "Add --inspect-brk? "))
+           (default-directory project-root))
+      (when (not (string-empty-p test-name))
+        (let ((command (concat "scripts/integration --silent=false --no-coverage --no-file-parallelism --reporter=basic -t " test-name
+                              (if use-inspect-brk " --inspect-brk" ""))))
+          (message "Running integration test: %s" command)
+          (async-shell-command command "*Integration Test*"))))))
+
+;; Workspace hydra - organized using :column feature
+(defhydra hydra-workspace (:color blue :columns 4)
+  "Workspace Commands"
+  ("s" workspace-setup-prodigy "setup prodigy" :column "Setup")
+  ("r" workspace-quick-start "quick start")
+  ("m" workspace-start-mock-robots "mock robots")
+  ("n" workspace-open-notebook "notebook" :column "Development")
+  ("a" workspace-arduino-shell "arduino cli")
+  ("i" workspace-run-integration-test "integration test")
+  ("y" workspace-yarn-install "yarn install")
+  ("g" workspace-generate-proto "generate proto" :column "Code Tools")
+  ("p" workspace-pyright-check "pyright check")
+  ("l" workspace-list-machines-for-system "list machines" :column "Utilities")
+  ("k" workspace-shutdown-all "shutdown all")
+  ("q" nil "quit" :exit t))
 
 ;; Define main keybinding for hydra
 (global-set-key (kbd "C-c m") 'hydra-workspace/body)
