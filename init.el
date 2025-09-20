@@ -48,6 +48,9 @@
   :mode (("\\.scala\\'" . scala-ts-mode)
          ("\\.sbt\\'" . scala-ts-mode)))
 
+(use-package websocket
+  :ensure t)
+
 (use-package typst-preview 
   :quelpa (typst-preview :fetcher github :repo "havarddj/typst-preview.el"))
 
