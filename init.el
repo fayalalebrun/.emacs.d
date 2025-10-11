@@ -636,6 +636,12 @@
   :ensure t
   :hook (after-init . envrc-global-mode))
 
+(use-package age
+  :ensure t
+  :demand t
+  :config
+  (age-file-enable))
+
 
 (use-package eat
   :ensure t
