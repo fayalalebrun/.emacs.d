@@ -49,7 +49,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
 ;;;###autoload
 (defun workspace-create-nix-ipython-interpreter (project-root)
   "Create a proper IPython interpreter configuration for nix shell."
-  (let ((nix-shell-cmd (format "nix --quiet --no-warn-dirty shell --impure %s.#vision.dev-shell --command" project-root)))
+  (let ((nix-shell-cmd (format "nix --quiet --no-warn-dirty shell --impure %s.#vision-all --command" project-root)))
     ;; Set up environment variables for better IPython detection
     (setenv "IPYTHONDIR" (expand-file-name ".ipython" project-root))
     (setenv "IPY_TEST_SIMPLE_PROMPT" "1")
@@ -181,6 +181,10 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
                   (setq-local code-cells-boundary-regexp "^# \\+")
                 (setq-local code-cells-boundary-regexp "^# %%")))
             (code-cells-mode 1)
+            ;; Enable auto-revert for notebook files
+            (auto-revert-mode 1)
+            ;; Setup notebook-specific keybindings for this buffer
+            (workspace-setup-notebook-keybindings)
             ;; Debug: show what cells are detected
             (message "code-cells-mode enabled, boundary regexp: %s" code-cells-boundary-regexp)
             (save-excursion
@@ -197,7 +201,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
                  (default-directory project-root)
                  ;; Use nix shell wrapper but call ipython directly for better prompt detection
                  (python-shell-interpreter "nix")
-                 (python-shell-interpreter-args "--quiet --no-warn-dirty shell --impure .#vision.dev-shell --command bash -c \"export PATH=/nix/store/30mhlcmz2p60rjgih2c3760zjc42g5m7-rerun-0.22.1/bin:$PATH && ipython -i --simple-prompt\"")
+                 (python-shell-interpreter-args "--quiet --no-warn-dirty shell --impure .#vision-all --command bash -c \"export PATH=/nix/store/30mhlcmz2p60rjgih2c3760zjc42g5m7-rerun-0.22.1/bin:$PATH && ipython -i --simple-prompt\"")
                  (python-shell-buffer-name python-buffer-name))
             
             ;; Start IPython in vision environment
@@ -255,15 +259,34 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
      ;; Otherwise, not in a notebook-related buffer
      (t (message "Not in a notebook or IPython buffer")))))
 
-;; Add keybinding for quick switching
+(defun workspace-restart-ipython ()
+  "Completely restart the IPython process."
+  (interactive)
+  (let* ((python-buffer (python-shell-get-buffer))
+         (python-process (when python-buffer (get-buffer-process python-buffer))))
+    (when python-process
+      (message "Restarting IPython process...")
+      (delete-process python-process)
+      ;; Wait a moment for cleanup then restart
+      (run-with-timer 1.0 nil 'run-python))))
+
+(defun workspace-send-buffer-with-restart ()
+  "Completely restart IPython and send the entire buffer."
+  (interactive)
+  (let* ((python-buffer (python-shell-get-buffer))
+         (python-process (when python-buffer (get-buffer-process python-buffer))))
+    (when python-process
+      (message "Restarting IPython process...")
+      (delete-process python-process)
+      ;; Wait for restart then send buffer
+      (run-with-timer 2.0 nil 'python-shell-send-buffer))))
+
+;; Setup keybindings for notebook operations
 (defun workspace-setup-notebook-keybindings ()
   "Setup keybindings for notebook operations."
-  (local-set-key (kbd "C-c n s") 'workspace-switch-to-notebook-ipython))
-
-;; Add to both python-mode and inferior-python-mode hooks
-(add-hook 'python-mode-hook 'workspace-setup-notebook-keybindings)
-(add-hook 'python-ts-mode-hook 'workspace-setup-notebook-keybindings)
-(add-hook 'inferior-python-mode-hook 'workspace-setup-notebook-keybindings)
+  (local-set-key (kbd "C-c n s") 'workspace-switch-to-notebook-ipython)
+  (local-set-key (kbd "C-c n b") 'workspace-send-buffer-with-restart)
+  (local-set-key (kbd "C-c n r") 'workspace-restart-ipython))
 
 (defun workspace-reload-vision-environment ()
   "Reload the vision environment without restarting Emacs."
@@ -274,7 +297,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
       (message "Reloading vision environment...")
       (let ((default-directory project-root))
         ;; Run the nix shell command to rebuild the environment
-        (shell-command "nix shell --impure .#vision.dev-shell --command true")
+        (shell-command "nix shell --impure .#vision-all --command true")
         (message "Vision environment reloaded! You may need to restart Python processes.")))))
 
 ;;;###autoload
@@ -289,6 +312,33 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
       (async-shell-command "nix run .#generate-proto" "*Generate Proto*"))))
 
 ;;;###autoload
+(defun workspace-decode-proto ()
+  "Decode a protobuf message using protoc."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (default-directory project-root)
+           (command (read-string "Command to get proto data: "))
+           (message-type (read-string "Message type: "))
+           (proto-file (read-file-name "Proto definition file: " 
+                                      (concat project-root "proto/") 
+                                      nil t nil
+                                      (lambda (name) (string-suffix-p ".proto" name))))
+           (proto-path (file-name-directory proto-file))
+           (proto-filename (file-name-nondirectory proto-file)))
+      (when (and (not (string-empty-p command))
+                 (not (string-empty-p message-type))
+                 (file-exists-p proto-file))
+        (let ((decode-command (format "%s | protoc --decode=%s --proto_path=%s %s"
+                                     command
+                                     message-type
+                                     (shell-quote-argument proto-path)
+                                     (shell-quote-argument proto-filename))))
+          (message "Decoding proto with: %s" decode-command)
+          (async-shell-command decode-command "*Proto Decode*"))))))
+
+;;;###autoload
 (defun workspace-pyright-check ()
   "Run pyright in the vision directory within the vision shell."
   (interactive)
@@ -300,7 +350,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
       (if (file-directory-p vision-path)
           (progn
             (message "Running pyright in vision directory...")
-            (async-shell-command "nix shell --impure ../.#vision.dev-shell --command pyright" "*Pyright Check*"))
+            (async-shell-command "nix shell --impure ../.#vision-all --command pyright" "*Pyright Check*"))
         (message "Vision directory %s not found" vision-path)))))
 
 ;;;###autoload
@@ -334,6 +384,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
   ("i" workspace-run-integration-test "integration test")
   ("y" workspace-yarn-install "yarn install")
   ("g" workspace-generate-proto "generate proto" :column "Code Tools")
+  ("d" workspace-decode-proto "decode proto")
   ("p" workspace-pyright-check "pyright check")
   ("l" workspace-list-machines-for-system "list machines" :column "Utilities")
   ("k" workspace-shutdown-all "shutdown all")
