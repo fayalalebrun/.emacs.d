@@ -354,6 +354,42 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
         (message "Vision directory %s not found" vision-path)))))
 
 ;;;###autoload
+(defun workspace-format-project ()
+  "Format the entire project by running formatters on all directories."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (default-directory project-root)
+           (portico-path (concat project-root "portico"))
+           (arcade-path (concat project-root "arcade"))
+           (vision-path (concat project-root "vision"))
+           (formatted-count 0))
+
+      ;; Format portico
+      (when (file-directory-p portico-path)
+        (message "Running yarn format in portico...")
+        (let ((default-directory portico-path))
+          (async-shell-command "yarn format" "*Format Portico*"))
+        (setq formatted-count (1+ formatted-count)))
+
+      ;; Format arcade
+      (when (file-directory-p arcade-path)
+        (message "Running cargo fmt in arcade...")
+        (let ((default-directory arcade-path))
+          (async-shell-command "cargo fmt --all" "*Format Arcade*"))
+        (setq formatted-count (1+ formatted-count)))
+
+      ;; Format vision
+      (when (file-directory-p vision-path)
+        (message "Running pyright in vision...")
+        (let ((default-directory vision-path))
+          (async-shell-command "nix shell --impure ../.#vision-all --command pyright" "*Format Vision*"))
+        (setq formatted-count (1+ formatted-count)))
+
+      (message "Started %d format tasks" formatted-count))))
+
+;;;###autoload
 (defun workspace-run-integration-test ()
   "Run integration tests with specified test name and optional --inspect-brk flag."
   (interactive)
@@ -386,6 +422,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
   ("g" workspace-generate-proto "generate proto" :column "Code Tools")
   ("d" workspace-decode-proto "decode proto")
   ("p" workspace-pyright-check "pyright check")
+  ("f" workspace-format-project "format project")
   ("l" workspace-list-machines-for-system "list machines" :column "Utilities")
   ("k" workspace-shutdown-all "shutdown all")
   ("q" nil "quit" :exit t))
