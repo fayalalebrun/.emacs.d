@@ -49,7 +49,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
 ;;;###autoload
 (defun workspace-create-nix-ipython-interpreter (project-root)
   "Create a proper IPython interpreter configuration for nix shell."
-  (let ((nix-shell-cmd (format "nix --quiet --no-warn-dirty shell --impure %s.#vision-all --command" project-root)))
+  (let ((nix-shell-cmd (format "nix --quiet --no-warn-dirty develop --impure %s.#vision --command" project-root)))
     ;; Set up environment variables for better IPython detection
     (setenv "IPYTHONDIR" (expand-file-name ".ipython" project-root))
     (setenv "IPY_TEST_SIMPLE_PROMPT" "1")
@@ -201,7 +201,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
                  (default-directory project-root)
                  ;; Use nix shell wrapper but call ipython directly for better prompt detection
                  (python-shell-interpreter "nix")
-                 (python-shell-interpreter-args "--quiet --no-warn-dirty shell --impure .#vision-all --command bash -c \"export PATH=/nix/store/30mhlcmz2p60rjgih2c3760zjc42g5m7-rerun-0.22.1/bin:$PATH && ipython -i --simple-prompt\"")
+                 (python-shell-interpreter-args "--quiet --no-warn-dirty develop --impure .#vision --command bash -c \"export PATH=/nix/store/30mhlcmz2p60rjgih2c3760zjc42g5m7-rerun-0.22.1/bin:$PATH && ipython -i --simple-prompt\"")
                  (python-shell-buffer-name python-buffer-name))
             
             ;; Start IPython in vision environment
@@ -297,7 +297,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
       (message "Reloading vision environment...")
       (let ((default-directory project-root))
         ;; Run the nix shell command to rebuild the environment
-        (shell-command "nix shell --impure .#vision-all --command true")
+        (shell-command "nix develop --impure .#vision --command true")
         (message "Vision environment reloaded! You may need to restart Python processes.")))))
 
 ;;;###autoload
@@ -350,7 +350,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
       (if (file-directory-p vision-path)
           (progn
             (message "Running pyright in vision directory...")
-            (async-shell-command "nix shell --impure ../.#vision-all --command pyright" "*Pyright Check*"))
+            (async-shell-command "nix develop --impure ../.#vision --command pyright" "*Pyright Check*"))
         (message "Vision directory %s not found" vision-path)))))
 
 ;;;###autoload
@@ -550,7 +550,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
       (message "Not in a projectile project")
     (let* ((project-root (projectile-project-root))
            (available-systems (workspace-get-available-systems))
-           (default-robots '("Pisa 2" "Petra 3" "Panama 2")) ; Fixed default order
+           (default-robots '("Pisa 11" "Petra 3" "Panama 2")) ; Fixed default order
            (default-robots-string (mapconcat 'identity default-robots ", "))
            (robot-systems (if available-systems
                               ;; Use helm for better multi-selection UX
@@ -576,7 +576,7 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
                                  (t selected)))
                             ;; Fallback when no arcades.json available
                             (let ((selected (completing-read-multiple "Enter robot systems (comma-separated): "
-                                                                     '("Pisa 2" "Panama 2" "Petra 3" "Petra 4" "Panama 3")
+                                                                     '("Pisa 11" "Panama 2" "Petra 3" "Petra 4" "Panama 3")
                                                                      nil nil nil nil default-robots-string)))
                               (if (and selected (> (length selected) 0))
                                   selected
@@ -671,8 +671,8 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
                             (prodigy-start-service service)))
                         (message "All prodigy services started")))
       
-      ;; Start mock robots with default settings (Pisa 2, Petra 3, Panama 2, speedup 1)
-      (let* ((default-robots '("Pisa 2" "Petra 3" "Panama 2"))
+      ;; Start mock robots with default settings (Pisa 11, Petra 3, Panama 2, speedup 1)
+      (let* ((default-robots '("Pisa 11" "Petra 3" "Panama 2"))
              (speedup "1")
              (arcade-path (concat project-root "arcade"))
              (robot-args (mapconcat 'shell-quote-argument default-robots " "))
