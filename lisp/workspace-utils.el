@@ -84,59 +84,63 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
 
 ;;;###autoload
 (defun workspace-setup-prodigy ()
-  "Setup prodigy services for the current workspace."
+  "Setup prodigy services for the current workspace.
+Uses project-scoped tags so services from different projects can coexist."
   (interactive)
-  (let* ((workspace-path (or (getenv "WORKSPACE_PATH") default-directory))
-         (workspace-name (or (getenv "WORKSPACE_NAME") 
-                            (if (and (featurep 'projectile) (projectile-project-p))
-                                (projectile-project-name)
-                              (file-name-nondirectory (directory-file-name workspace-path))))))
-    
-    (when workspace-path
-      (message "Setting up workspace: %s" workspace-name)
-      (setq default-directory workspace-path)
-      
-      ;; Clear existing services
-      (setq prodigy-services nil)
-      
-      ;; Add vision-shell service
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((workspace-path (projectile-project-root))
+           (workspace-name (projectile-project-name))
+           ;; Create a unique tag for this project
+           (project-tag (intern (format "project/%s" workspace-name))))
+
+      (message "Setting up workspace: %s at %s" workspace-name workspace-path)
+
+      ;; Remove ONLY services tagged with this project (not all services)
+      (setq prodigy-services
+            (seq-remove (lambda (service)
+                          (memq project-tag (plist-get service :tags)))
+                        prodigy-services))
+
+      ;; Define services with project-specific names and tags
       (prodigy-define-service
-        :name "calibration_service"
+        :name (format "%s/calibration_service" workspace-name)
         :command "nix"
         :args '("run" ".#calibration-service")
         :cwd workspace-path
-        :tags '(workspace vision))
-      
+        :tags (list project-tag 'workspace 'vision))
+
       (prodigy-define-service
-        :name "calibration service proxy"
+        :name (format "%s/proxy" workspace-name)
         :command "/home/francisco/grpcwebproxy/grpcwebproxy-v0.15.0-linux-x86_64"
-        :args '("--backend_addr" "localhost:6001" 
-                "--run_tls_server=false" 
-                "--server_http_debug_port" "9900" 
-                "--server_http_max_read_timeout=300s" 
+        :args '("--backend_addr" "localhost:6001"
+                "--run_tls_server=false"
+                "--server_http_debug_port" "9900"
+                "--server_http_max_read_timeout=300s"
                 "--server_http_max_write_timeout=300s")
-        :tags '(workspace vision proxy))
-      
+        :tags (list project-tag 'workspace 'vision 'proxy))
+
       (prodigy-define-service
-        :name "portico"
+        :name (format "%s/portico" workspace-name)
         :command "yarn"
         :args '("run" "dev")
-	:cwd (concat workspace-path "/portico")
-        :tags '(workspace vision))
+        :cwd (concat workspace-path "/portico")
+        :tags (list project-tag 'workspace 'vision))
 
       (prodigy-define-service
-        :name "atrium"
+        :name (format "%s/atrium" workspace-name)
         :command "electron"
         :args '("atrium" "--allow-multiple-instances")
-	:cwd "~/sources/atrium-linux"
-        :tags '(workspace vision))
+        :cwd "~/sources/atrium-linux"
+        :tags (list project-tag 'workspace 'vision))
 
-      
-      
-      ;; Start prodigy
-      (prodigy)
-      
-      (message "Workspace services configured for %s" workspace-name))))
+      ;; Open prodigy from the workspace root
+      (let ((default-directory workspace-path))
+        (prodigy))
+
+      ;; Filter to current project (use 'f' to clear filters in prodigy if needed)
+      (message "Workspace services configured for %s (filter by tag: %s)"
+               workspace-name project-tag))))
 
 ;;;###autoload
 (defun workspace-open-notebook ()
@@ -602,7 +606,8 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
 
 ;;;###autoload
 (defun workspace-shutdown-all ()
-  "Shutdown all workspace processes including prodigy services and eat buffers."
+  "Shutdown all workspace processes including prodigy services and eat buffers.
+Only stops services belonging to the current project."
   (interactive)
   (if (not (and (featurep 'projectile) (projectile-project-p)))
       (message "Not in a projectile project")
@@ -610,28 +615,28 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
            (workspace-name (if (and (featurep 'projectile) (projectile-project-p))
                               (projectile-project-name)
                             (file-name-nondirectory (directory-file-name project-root))))
+           (project-tag (intern (format "project/%s" workspace-name)))
            (stopped-services 0)
            (killed-buffers 0))
-      
-      ;; Stop prodigy services
+
+      ;; Stop only THIS project's prodigy services
       (when (get-buffer "*prodigy*")
-        (setq stopped-services (length prodigy-services))
-        ;; Stop all prodigy services
         (dolist (service prodigy-services)
-          (when (prodigy-service-started-p service)
-            (prodigy-stop-service service))))
+          (when (and (memq project-tag (plist-get service :tags))
+                     (prodigy-service-started-p service))
+            (prodigy-stop-service service)
+            (setq stopped-services (1+ stopped-services)))))
       
       ;; Kill buffers related to THIS workspace only
+      ;; Note: *prodigy* buffer is NOT killed since it's shared across projects
       (dolist (buffer (buffer-list))
         (let ((buffer-name (buffer-name buffer)))
           (when (and buffer-name  ; Check buffer-name is not nil
-                     (or 
+                     (or
                       ;; Mock Robots buffers (contain project-specific system names)
                       (string-match "\\*Mock Robots" buffer-name)
                       ;; Arduino Shell buffer for this workspace
                       (string-equal buffer-name (format workspace-arduino-shell-buffer-format workspace-name))
-                      ;; Prodigy buffer
-                      (string-equal buffer-name "*prodigy*")
                       ;; IPython buffers from this workspace's notebooks
                       (and (string-match "\\*IPython\\[.*\\]\\*" buffer-name)
                            (with-current-buffer buffer
@@ -657,19 +662,23 @@ Add this to your init.el to persist across sessions: (savehist-mode 1)")
   (if (not (and (featurep 'projectile) (projectile-project-p)))
       (message "Not in a projectile project")
     (let* ((project-root (projectile-project-root))
-           (workspace-name (projectile-project-name)))
+           (workspace-name (projectile-project-name))
+           (project-tag (intern (format "project/%s" workspace-name))))
       (message "Quick starting workspace: %s" workspace-name)
-      
+
       ;; Setup prodigy services
       (workspace-setup-prodigy)
-      
-      ;; Start all prodigy services after a brief delay to ensure prodigy is ready
-      (run-with-timer 1 nil
-                      (lambda ()
-                        (dolist (service prodigy-services)
-                          (unless (prodigy-service-started-p service)
-                            (prodigy-start-service service)))
-                        (message "All prodigy services started")))
+
+      ;; Start only THIS project's prodigy services after a brief delay
+      (let ((tag project-tag)
+            (name workspace-name))
+        (run-with-timer 1 nil
+                        (lambda ()
+                          (dolist (service prodigy-services)
+                            (when (and (memq tag (plist-get service :tags))
+                                       (not (prodigy-service-started-p service)))
+                              (prodigy-start-service service)))
+                          (message "All %s prodigy services started" name))))
       
       ;; Start mock robots with default settings (Pisa 11, Petra 3, Panama 2, speedup 1)
       (let* ((default-robots '("Pisa 11" "Petra 3" "Panama 2"))
