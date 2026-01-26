@@ -21,6 +21,22 @@
 
 (require 'use-package)
 
+;; Keep ~/.emacs.d clean - redirect backup/autosave/etc to standard locations
+(use-package no-littering
+  :ensure t
+  :config
+  ;; Set backup/autosave directories explicitly (no-littering-theme-backups
+  ;; causes issues with Helm's helm-ff--in-backup-directory)
+  (setq backup-directory-alist
+        `(("." . ,(no-littering-expand-var-file-name "backup/"))))
+  (setq auto-save-file-name-transforms
+        `((".*" ,(no-littering-expand-var-file-name "auto-save/") t))))
+
+(use-package recentf
+  :after no-littering
+  :config
+  (add-to-list 'recentf-exclude no-littering-var-directory)
+  (add-to-list 'recentf-exclude no-littering-etc-directory))
 
 (use-package quelpa-use-package
   :ensure t)
