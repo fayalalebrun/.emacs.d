@@ -351,6 +351,8 @@
   (setq aw-keys '(?a ?s ?d ?f ?g ?h ?j ?k ?l))
   ;; Don't always dispatch - allow auto-switch with 2 windows
   (setq aw-dispatch-always nil)
+  ;; Only consider windows in current frame
+  (setq aw-scope 'frame)
   ;; Larger overlay for better visibility
   (setq aw-background t)
   ;; Auto-switch when 3 or fewer windows (no selection needed)
