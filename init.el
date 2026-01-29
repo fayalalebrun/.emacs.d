@@ -1,5 +1,10 @@
 (setq gnutls-algorithm-priority "NORMAL:-VERS-TLS1.3")
 
+;; OSC 52 clipboard support for terminal Emacs
+(when (not (display-graphic-p))
+  (setq xterm-extra-capabilities '(setSelection))
+  (terminal-init-xterm))
+
 (show-paren-mode 1)
 (toggle-truncate-lines)
 (setq visible-bell t)
