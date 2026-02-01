@@ -703,6 +703,25 @@
   :bind-keymap ("C-c c" . claude-code-command-map)
   )
 
+(use-package ai-code
+  :quelpa (ai-code :fetcher github :repo "tninja/ai-code-interface.el")
+  :config
+  (require 'ai-code-notifications)
+  (setq ai-code-notifications-enabled t)
+  (setq ai-code-notifications-show-on-response t)
+  ;; Timeout in milliseconds; 0 = stay until dismissed.
+  (setq ai-code-notifications-timeout 5000)
+  ;; Prefer eat over vterm for terminal sessions.
+  (setq ai-code-backends-infra-terminal-backend 'eat)
+  (require 'ai-code-backends)
+  ;; Set a default backend so transient has concrete commands.
+  (ai-code-set-backend 'claude-code)
+  ;; Select a backend in the menu (C-c a, then s) or set one explicitly:
+  ;; (ai-code-set-backend 'claude-code-ide)
+  (global-set-key (kbd "C-c a") #'ai-code-menu)
+  (with-eval-after-load 'magit
+    (ai-code-magit-setup-transients)))
+
 
 (use-package pg
   :quelpa (pg :fetcher github :repo "emarsden/pg-el")
