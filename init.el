@@ -2,8 +2,10 @@
 
 ;; OSC 52 clipboard support for terminal Emacs
 (when (not (display-graphic-p))
+  (require 'term/xterm)
   (setq xterm-extra-capabilities '(setSelection))
-  (terminal-init-xterm))
+  (when (fboundp 'terminal-init-xterm)
+    (terminal-init-xterm)))
 
 (show-paren-mode 1)
 (toggle-truncate-lines)
@@ -739,9 +741,24 @@
 (use-package hydra
   :ensure t)
 
+;; Keep shell-command-x and envrc behavior together.
+(defun my-envrc--shell-command-x-with-local-env (orig-fun command &optional output-buffer &rest args)
+  "Run shell-command-x with a stable envrc environment."
+  (if (derived-mode-p 'shell-command-mode)
+      (progn
+        (envrc-mode 1)
+        (envrc--update)
+        ;; Keep env stable even if shell-command-x switches buffers mid-run.
+        (let ((process-environment process-environment)
+              (exec-path exec-path))
+          (apply orig-fun command output-buffer args)))
+    (apply orig-fun command output-buffer args)))
+
 (use-package shell-command-x
   :ensure t
   :config
+  (advice-add #'shell-command-x--shell-command-advice :around
+              #'my-envrc--shell-command-x-with-local-env)
   (shell-command-x-mode 1))
 
 (defun reload-config ()
