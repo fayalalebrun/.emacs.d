@@ -705,14 +705,20 @@
   :bind-keymap ("C-c c" . claude-code-command-map)
   )
 
+(use-package agent-board
+  :load-path "lisp"
+  :after (ai-code magit)
+  :commands (agent-board)
+  :bind ("C-c w" . agent-board))
+
 (use-package ai-code
   :quelpa (ai-code :fetcher github :repo "tninja/ai-code-interface.el")
   :config
-  (require 'ai-code-notifications)
-  (setq ai-code-notifications-enabled t)
-  (setq ai-code-notifications-show-on-response t)
-  ;; Timeout in milliseconds; 0 = stay until dismissed.
-  (setq ai-code-notifications-timeout 5000)
+  ;; (require 'ai-code-notifications)
+  ;; (setq ai-code-notifications-enabled t)
+  ;; (setq ai-code-notifications-show-on-response t)
+  ;; ;; Timeout in milliseconds; 0 = stay until dismissed.
+  ;; (setq ai-code-notifications-timeout 5000)
   ;; Prefer eat over vterm for terminal sessions.
   (setq ai-code-backends-infra-terminal-backend 'eat)
   (require 'ai-code-backends)
@@ -905,7 +911,16 @@
      "%latex -interaction nonstopmode -output-directory %o %f"
      "%latex -interaction nonstopmode -output-directory %o %f"))
  '(org-startup-truncated nil)
- '(package-selected-packages nil)
+ '(package-selected-packages
+   '(ag age agent-shell agent-shell-manager ai-code auctex cargo
+	clang-format claude-code code-cells comint-mime company
+	deadgrep eat ement emms envrc exec-path-from-shell eyebrowse
+	flycheck glsl-mode haskell-mode helm-lsp helm-projectile
+	helm-tramp lsp-metals lsp-pyright lsp-ui lua-mode neotree
+	nix-ts-mode no-littering org-download org-roam pdf-tools
+	pgmacs platformio-mode prettier prodigy quelpa-use-package
+	rust-mode sbt-mode scala-ts-mode separedit shell-command-x
+	toml-mode typst-preview typst-ts-mode xelb yasnippet))
  '(pdf-tools-handle-upgrades nil)
  '(safe-local-variable-directories
    '("/home/fal/Sync/rtlking/" "/home/fal/Default Folder/rtlking/"
@@ -978,4 +993,4 @@
  ;; If you edit it by hand, you could mess it up, so be careful.
  ;; Your init file should contain only one such instance.
  ;; If there is more than one, they won't work right.
- )
+ '(aw-leading-char-face ((t (:foreground "red" :background "black" :weight bold :height 3.0)))))
