@@ -111,11 +111,11 @@ REPO-ROOT is the canonical primary worktree path."
                      (matched-buf
                       (cl-find-if
                        (lambda (buf)
-                         (let ((dir (buffer-local-value 'default-directory buf)))
-                           (and dir
-                                (file-directory-p dir)
-                                (file-in-directory-p
-                                 (file-truename dir) path))))
+                         (and (get-buffer-process buf)
+                              (let ((dir (buffer-local-value 'default-directory buf)))
+                                (and dir
+                                     (file-directory-p dir)
+                                     (file-equal-p dir path)))))
                        ai-bufs)))
                 (push (make-agent-board-workspace
                        :project project
