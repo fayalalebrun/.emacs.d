@@ -18,7 +18,7 @@
 
 (cl-defstruct agent-board-workspace
   "A worktree with optional ai-code session buffer."
-  project toplevel branch worktree buffer primary-p)
+  project toplevel branch worktree buffer primary-p task)
 
 (defvar agent-board--refresh-timer nil
   "Buffer-local timer for auto-refresh.")
@@ -39,6 +39,12 @@ Returns nil if DIR does not exist or is not in a git repo."
         (when common-dir
           (file-truename
            (expand-file-name (file-name-as-directory "..") common-dir)))))))
+
+(defun agent-board--task (toplevel branch)
+  "Return the git branch description for BRANCH in repo at TOPLEVEL."
+  (when (and branch (not (string= branch "(detached)")))
+    (let ((default-directory toplevel))
+      (magit-git-string "config" (format "branch.%s.description" branch)))))
 
 (defun agent-board--status (ws)
   "Return status string for workspace WS."
@@ -123,9 +129,17 @@ REPO-ROOT is the canonical primary worktree path."
                        :branch (or branch "(detached)")
                        :worktree path
                        :buffer matched-buf
-                       :primary-p (string= path primary-path))
+                       :primary-p (string= path primary-path)
+                       :task (agent-board--task toplevel branch))
                       result)))))))
-    (nreverse result)))
+    (sort (nreverse result)
+          (lambda (a b)
+            (let ((pa (agent-board-workspace-project a))
+                  (pb (agent-board-workspace-project b)))
+              (if (string= pa pb)
+                  (string< (agent-board-workspace-worktree a)
+                           (agent-board-workspace-worktree b))
+                (string< pa pb)))))))
 
 (defun agent-board--entries ()
   "Return `tabulated-list-entries' for the board."
@@ -134,20 +148,17 @@ REPO-ROOT is the canonical primary worktree path."
     (mapcar
      (lambda (ws)
        (let* ((status (agent-board--status ws))
-              (path (agent-board-workspace-worktree ws))
-              (buf (agent-board-workspace-buffer ws))
-              (buf-name (if (and buf (buffer-live-p buf))
-                            (buffer-name buf)
-                          "-")))
+              (path (agent-board-workspace-worktree ws)))
          (puthash path ws agent-board--workspaces)
          (list path
                (vector
                 (propertize status 'face (agent-board--status-face status))
                 (agent-board-workspace-project ws)
+                (or (agent-board-workspace-task ws) "-")
                 (agent-board-workspace-branch ws)
-                (abbreviate-file-name path)
-                buf-name))))
+                (abbreviate-file-name path)))))
      workspaces)))
+
 
 (defun agent-board--workspace-at-point ()
   "Return the `agent-board-workspace' at point."
@@ -228,6 +239,25 @@ that a timer-driven refresh does not move the user's cursor."
        (t
         (user-error "No running agent to interrupt"))))))
 
+(defun agent-board-set-task ()
+  "Set the task description for the branch at point.
+Stored as the git branch description."
+  (interactive)
+  (let ((ws (agent-board--workspace-at-point)))
+    (unless ws (user-error "No workspace at point"))
+    (let* ((branch (agent-board-workspace-branch ws))
+           (toplevel (agent-board-workspace-toplevel ws))
+           (current (agent-board-workspace-task ws))
+           (task (read-string (format "Task for %s: " branch) current)))
+      (when (string= branch "(detached)")
+        (user-error "Cannot set task on a detached HEAD"))
+      (let ((default-directory toplevel)
+            (key (format "branch.%s.description" branch)))
+        (if (string-empty-p task)
+            (magit-call-git "config" "--unset" key)
+          (magit-call-git "config" key task)))
+      (agent-board-refresh))))
+
 (defun agent-board-create ()
   "Create a new worktree, then start an agent there.
 If the branch already exists, check it out; otherwise create it.
@@ -246,10 +276,14 @@ Uses the repo of the workspace at point, or prompts for a directory."
          (start-point (unless existing
                         (magit-read-branch-or-commit "Start point")))
          (worktree-dir (funcall magit-read-worktree-directory-function
-                                "Worktree directory: " branch)))
+                                "Worktree directory: " branch))
+         (task (read-string (format "Task for %s: " branch))))
     (if existing
         (magit-worktree-checkout worktree-dir branch)
       (magit-worktree-branch worktree-dir branch start-point))
+    (when (and (not (string-empty-p task))
+               (not (string= branch "(detached)")))
+      (magit-call-git "config" (format "branch.%s.description" branch) task))
     (let ((dir (expand-file-name worktree-dir))
           (board-buf (current-buffer)))
       (run-with-timer 1.5 nil
@@ -300,6 +334,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
          (propertize "Keybindings" 'face 'bold) "\n"
          "  RET      Jump to agent buffer at point\n"
          "  g        Refresh\n"
+         "  t        Set task (git branch description)\n"
          "  k        Kill agent (keep worktree)\n"
          "  c        Create workspace (new worktree + agent)\n"
          "  r        Restart agent in workspace\n"
@@ -334,6 +369,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
 (define-key agent-board-mode-map (kbd "c") #'agent-board-create)
 (define-key agent-board-mode-map (kbd "r") #'agent-board-restart)
 (define-key agent-board-mode-map (kbd "d") #'agent-board-delete)
+(define-key agent-board-mode-map (kbd "t") #'agent-board-set-task)
 (define-key agent-board-mode-map (kbd "C-c C-c") #'agent-board-interrupt)
 (define-key agent-board-mode-map (kbd "G") #'agent-board-magit)
 (define-key agent-board-mode-map (kbd "q") #'quit-window)
@@ -347,9 +383,9 @@ Uses the repo of the workspace at point, or prompts for a directory."
   (setq tabulated-list-format
         [("Status"   10 t)
          ("Project"  15 t)
+         ("Task"     50 t)
          ("Branch"   25 t)
-         ("Worktree" 40 t)
-         ("Agent"    30 t)])
+         ("Worktree" 40 t)])
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header)
   (let ((board-buf (current-buffer)))
