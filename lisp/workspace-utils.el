@@ -156,13 +156,13 @@ Uses project-scoped tags so services from different projects can coexist."
              (if (file-directory-p notebook-dir)
                  (let ((default-directory notebook-dir))
                    (if (fboundp 'helm-find-files)
-                       (helm :sources 
+                       (helm :sources
                              (helm-build-sync-source "Notebooks"
                                :candidates (lambda ()
-                                           (directory-files notebook-dir t "\\.\\(py\\|ipynb\\)$"))
+                                           (directory-files-recursively notebook-dir "\\.\\(py\\|ipynb\\)$"))
                                :candidate-transformer (lambda (candidates)
-                                                      (mapcar (lambda (c) 
-                                                               (cons (file-name-nondirectory c) c)) 
+                                                      (mapcar (lambda (c)
+                                                               (cons (file-relative-name c notebook-dir) c))
                                                              candidates)))
                              :buffer "*helm notebooks*")
                      (read-file-name "Open notebook: " notebook-dir nil t nil
