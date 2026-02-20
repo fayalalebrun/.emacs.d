@@ -760,6 +760,11 @@
           (apply orig-fun command output-buffer args)))
     (apply orig-fun command output-buffer args)))
 
+(use-package bash-completion
+  :ensure t
+  :config
+  (bash-completion-setup))
+
 (use-package shell-command-x
   :ensure t
   :config
