@@ -74,7 +74,10 @@
 (use-package websocket
   :ensure t)
 
-(use-package typst-preview 
+(use-package shell-maker
+  :ensure t)
+
+(use-package typst-preview
   :quelpa (typst-preview :fetcher github :repo "havarddj/typst-preview.el"))
 
 (use-package treesit
@@ -705,11 +708,23 @@
   :bind-keymap ("C-c c" . claude-code-command-map)
   )
 
+(use-package web-server
+  :ensure t)
+
+(use-package agent-pipe
+  :load-path "lisp"
+  :commands (agent-pipe-start agent-pipe-send agent-pipe-resume agent-pipe-continue))
+
 (use-package agent-board
   :load-path "lisp"
-  :after (ai-code magit)
+  :after (agent-pipe magit)
   :commands (agent-board)
   :bind ("C-c w" . agent-board))
+
+(use-package agent-web
+  :load-path "lisp"
+  :after (agent-board agent-pipe web-server)
+  :commands (agent-web-start agent-web-stop))
 
 (use-package ai-code
   :quelpa (ai-code :fetcher github :repo "tninja/ai-code-interface.el")
@@ -917,15 +932,16 @@
      "%latex -interaction nonstopmode -output-directory %o %f"))
  '(org-startup-truncated nil)
  '(package-selected-packages
-   '(ag age agent-shell agent-shell-manager ai-code auctex cargo
-	clang-format claude-code code-cells comint-mime company
-	deadgrep eat ement emms envrc exec-path-from-shell eyebrowse
-	flycheck glsl-mode haskell-mode helm-lsp helm-projectile
-	helm-tramp lsp-metals lsp-pyright lsp-ui lua-mode neotree
-	nix-ts-mode no-littering org-download org-roam pdf-tools
-	pgmacs platformio-mode prettier prodigy quelpa-use-package
-	rust-mode sbt-mode scala-ts-mode separedit shell-command-x
-	toml-mode typst-preview typst-ts-mode xelb yasnippet))
+   '(ag age agent-shell agent-shell-manager ai-code auctex
+	bash-completion cargo clang-format claude-code code-cells
+	comint-mime company deadgrep eat ement emms envrc
+	exec-path-from-shell eyebrowse flycheck glsl-mode haskell-mode
+	helm-lsp helm-projectile helm-tramp lsp-metals lsp-pyright
+	lsp-ui lua-mode neotree nix-ts-mode no-littering org-download
+	org-roam pdf-tools pgmacs platformio-mode prettier prodigy
+	quelpa-use-package rust-mode sbt-mode scala-ts-mode separedit
+	shell-command-x toml-mode typst-preview typst-ts-mode
+	web-server xelb yasnippet))
  '(pdf-tools-handle-upgrades nil)
  '(safe-local-variable-directories
    '("/home/fal/Sync/rtlking/" "/home/fal/Default Folder/rtlking/"

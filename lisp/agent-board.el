@@ -13,11 +13,10 @@
 (declare-function magit-worktree-checkout "magit-worktree")
 (declare-function magit-worktree-delete "magit-worktree")
 
-(declare-function ai-code-claude-code "ai-code-claude-code")
-(declare-function ai-code-backends-infra--session-buffer-p "ai-code-backends-infra")
+(require 'agent-pipe)
 
 (cl-defstruct agent-board-workspace
-  "A worktree with optional ai-code session buffer."
+  "A worktree with optional agent-pipe session buffer."
   project toplevel branch worktree buffer primary-p task)
 
 (defvar agent-board--refresh-timer nil
@@ -52,14 +51,12 @@ Returns nil if DIR does not exist or is not in a git repo."
     (cond
      ((or (null buf) (not (buffer-live-p buf)))
       "no-agent")
-     ((not (get-buffer-process buf))
-      "exited")
-     ((with-current-buffer buf
-        (and ai-code-backends-infra--last-activity-time
-             (< (float-time (time-since ai-code-backends-infra--last-activity-time))
-                (or ai-code-backends-infra-idle-delay 5.0))))
-      "busy")
-     (t "idle"))))
+     (t
+      (let ((session (buffer-local-value 'agent-pipe--session-ref buf)))
+        (pcase (and session (agent-pipe-session-status session))
+          ('running "busy")
+          ('error   "exited")
+          (_        "idle")))))))
 
 (defun agent-board--status-face (status)
   "Return face for STATUS string."
@@ -69,21 +66,22 @@ Returns nil if DIR does not exist or is not in a git repo."
     ("exited" 'error)
     (_        'shadow)))
 
-(defun agent-board--ai-code-buffers ()
-  "Return all live ai-code session buffers."
+(defun agent-board--agent-pipe-buffers ()
+  "Return all live agent-pipe session buffers."
   (cl-remove-if-not
    (lambda (buf)
      (and (buffer-live-p buf)
-          (ai-code-backends-infra--session-buffer-p buf)))
+          (with-current-buffer buf
+            (derived-mode-p 'agent-pipe-mode))))
    (buffer-list)))
 
 (defun agent-board--discover-repos ()
-  "Return alist of (REPO-ROOT . AI-BUFS) for all repos with ai-code sessions.
+  "Return alist of (REPO-ROOT . AI-BUFS) for all repos with agent-pipe sessions.
 Also includes pinned repos added via `agent-board'.
 REPO-ROOT is the canonical primary worktree path."
-  (let ((ai-bufs (agent-board--ai-code-buffers))
+  (let ((ai-bufs (agent-board--agent-pipe-buffers))
         (repos (make-hash-table :test 'equal)))
-    ;; Group ai-code buffers by their canonical repo root.
+    ;; Group agent-pipe buffers by their canonical repo root.
     (dolist (buf ai-bufs)
       (let* ((dir (buffer-local-value 'default-directory buf))
              (root (and dir (agent-board--repo-root dir))))
@@ -99,7 +97,7 @@ REPO-ROOT is the canonical primary worktree path."
       result)))
 
 (defun agent-board--build-workspaces ()
-  "Build list of workspace structs from all repos with ai-code sessions."
+  "Build list of workspace structs from all repos with agent-pipe sessions."
   (let ((repos (agent-board--discover-repos))
         result)
     (dolist (repo repos)
@@ -117,11 +115,10 @@ REPO-ROOT is the canonical primary worktree path."
                      (matched-buf
                       (cl-find-if
                        (lambda (buf)
-                         (and (get-buffer-process buf)
-                              (let ((dir (buffer-local-value 'default-directory buf)))
-                                (and dir
-                                     (file-directory-p dir)
-                                     (file-equal-p dir path)))))
+                         (let ((dir (buffer-local-value 'default-directory buf)))
+                           (and dir
+                                (file-directory-p dir)
+                                (file-equal-p dir path))))
                        ai-bufs)))
                 (push (make-agent-board-workspace
                        :project project
@@ -206,8 +203,7 @@ that a timer-driven refresh does not move the user's cursor."
     (unless ws (user-error "No workspace at point"))
     (let ((dir (file-truename (agent-board-workspace-worktree ws)))
           (board-buf (current-buffer)))
-      (let ((default-directory dir))
-        (ai-code-claude-code))
+      (agent-pipe-start nil nil dir)
       (run-with-timer 0.5 nil (lambda ()
                                 (when (buffer-live-p board-buf)
                                   (with-current-buffer board-buf
@@ -234,7 +230,9 @@ that a timer-driven refresh does not move the user's cursor."
     (let ((buf (agent-board-workspace-buffer ws)))
       (cond
        ((and buf (buffer-live-p buf) (get-buffer-process buf))
-        (interrupt-process (get-buffer-process buf))
+        (let ((session (buffer-local-value 'agent-pipe--session-ref buf)))
+          (when session
+            (agent-pipe-interrupt session)))
         (agent-board-refresh))
        (t
         (user-error "No running agent to interrupt"))))))
@@ -288,8 +286,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
           (board-buf (current-buffer)))
       (run-with-timer 1.5 nil
                       (lambda ()
-                        (let ((default-directory dir))
-                          (ai-code-claude-code))
+                        (agent-pipe-start nil nil dir)
                         (when (buffer-live-p board-buf)
                           (with-current-buffer board-buf
                             (agent-board-refresh))))))))
