@@ -1,16 +1,16 @@
-;;; agent-web.el --- HTTP frontend for agent-pipe and agent-board -*- lexical-binding: t; -*-
+;;; agent-web.el --- HTTP frontend for agent-bridge and agent-board -*- lexical-binding: t; -*-
 
 ;;; Code:
 
 (require 'web-server)
 (require 'url-util)
-(require 'agent-pipe)
+(require 'agent-bridge)
 (require 'agent-board)
 
 (defcustom agent-web-port 7780
   "Port for the agent-web HTTP server."
   :type 'integer
-  :group 'agent-pipe)
+  :group 'agent-bridge)
 
 (defvar agent-web--server nil
   "The running ws-server instance.")
@@ -78,7 +78,10 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
   (concat
    "<!DOCTYPE html>\n<html>\n<head>\n"
    "<meta charset=\"utf-8\">\n"
+   "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
    "<script src=\"https://cdn.jsdelivr.net/npm/marked/marked.min.js\"></script>\n"
+   "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css\">\n"
+   "<script src=\"https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js\"></script>\n"
    "<title>" (agent-web--html-escape title) "</title>\n"
    "<style>\n"
    "body { font-family: monospace; margin: 0; display: flex;"
@@ -106,7 +109,7 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
    " padding: 6px 16px; cursor: pointer; font-family: monospace; margin: 2px; }\n"
    "button:hover { background: #1a3a5c; }\n"
    ".idle { color: #66bb6a; }\n"
-   ".busy, .running { color: #ffa726; }\n"
+   ".busy, .running, .waiting { color: #ffa726; }\n"
    ".exited, .error, .completed { color: #ef5350; }\n"
    ".no-agent, .no-session { color: #888; }\n"
    "tr.clickable { cursor: pointer; }\n"
@@ -128,10 +131,59 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
    ".assistant-text code { background: #0f0f23; padding: 2px 4px; }\n"
    ".assistant-text pre { background: #0f0f23; padding: 1em; }\n"
    ".assistant-text pre code { padding: 0; }\n"
+   ".tool-use.in-progress summary { color: #ffa726; }\n"
+   ".tool-use.in-progress { border-left: 2px solid #ffa726;"
+   " padding-left: 0.5em; }\n"
+   "@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }\n"
+   ".status-indicator { display: inline-block; margin-right: 0.3em; }\n"
+   ".status-indicator.running { animation: pulse 1.5s infinite; color: #ffa726; }\n"
+   ".status-indicator.completed { color: #66bb6a; }\n"
+   ".status-indicator.failed { color: #ef5350; }\n"
+   ".diff-block { margin: 0.5em 0; }\n"
+   ".diff-block pre { margin: 0; font-size: 0.85em; }\n"
+   ".diff-old pre { background: #2a0a0a; color: #ef9a9a; }\n"
+   ".diff-new pre { background: #0a2a0a; color: #a5d6a7; }\n"
+   ".diff-file { color: #4fc3f7; font-size: 0.85em; margin-bottom: 0.3em; }\n"
+   ".plan-list { list-style: none; padding: 0; margin: 0.3em 0; }\n"
+   ".plan-list li { padding: 2px 0; }\n"
+   ".plan-status { display: inline-block; width: 1.2em; text-align: center; }\n"
+   ".usage-bar { display: inline-flex; align-items: center; gap: 0.5em;"
+   " font-size: 0.8em; margin-left: 1em; color: #aaa; }\n"
+   ".usage-bar-track { width: 80px; height: 8px; background: #333;"
+   " border-radius: 4px; overflow: hidden; display: inline-block; }\n"
+   ".usage-bar-fill { height: 100%; border-radius: 4px; }\n"
+   "@media (max-width: 768px) {\n"
+   " body { flex-direction: column; }\n"
+   " .sidebar-col { width: 100%; height: auto; flex-direction: row;"
+   " align-items: center; border-right: none;"
+   " border-bottom: 1px solid #333; }\n"
+   " .sidebar-col iframe { display: none; }\n"
+   " .sidebar-col .dash-link { padding: 0.6em 1em; }\n"
+   " .content { height: auto; min-height: 80vh; padding: 0.5em 0.8em; }\n"
+   " .output { max-height: none; }\n"
+   " pre { max-height: none; }\n"
+   " textarea { font-size: 16px; }\n"
+   " button { padding: 10px 18px; }\n"
+   " h1 { font-size: 1.1em; margin: 0.4em 0; }\n"
+   "}\n"
    "</style>\n"
    (if refresh (format "<meta http-equiv=\"refresh\" content=\"%d\">\n" refresh) "")
    "<script>\n"
    "addEventListener('DOMContentLoaded',function(){\n"
+   " if(typeof marked!=='undefined'&&typeof katex!=='undefined'){\n"
+   "  marked.use({extensions:[{name:'math',level:'inline',\n"
+   "   start:function(src){return src.indexOf('$');},\n"
+   "   tokenizer:function(src){\n"
+   "    var b=src.match(/^\\$\\$([\\s\\S]+?)\\$\\$/);\n"
+   "    if(b)return{type:'math',raw:b[0],text:b[1],display:true};\n"
+   "    var i=src.match(/^\\$([^$\\n]+?)\\$/);\n"
+   "    if(i)return{type:'math',raw:i[0],text:i[1],display:false};\n"
+   "   },\n"
+   "   renderer:function(token){\n"
+   "    return katex.renderToString(token.text,\n"
+   "     {displayMode:token.display,throwOnError:false});\n"
+   "   }}]});\n"
+   " }\n"
    " document.querySelectorAll('.assistant-text').forEach(function(el){\n"
    "  if(typeof marked!=='undefined')\n"
    "   el.innerHTML=marked.parse(el.textContent)})});\n"
@@ -165,7 +217,7 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
 ;;; Output rendering
 
 (defun agent-web--render-segments-html (segments)
-  "Render agent-pipe display SEGMENTS as HTML."
+  "Render display SEGMENTS as HTML."
   (let ((parts nil)
         (last-tool-label nil))
     (dolist (seg segments)
@@ -178,21 +230,48 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
          (push (format "<div class=\"assistant-text\">%s</div>\n"
                        (agent-web--html-escape (alist-get 'text seg)))
                parts))
+        ('thought
+         (push (format
+                (concat "<details class=\"tool-use\">"
+                        "<summary>&#128161; Thinking</summary>"
+                        "<pre>%s</pre></details>\n")
+                (agent-web--html-escape (alist-get 'text seg)))
+               parts))
         ('tool-use
          (let* ((name (alist-get 'name seg))
                 (input (alist-get 'input seg))
-                (label (agent-pipe-tool-label name input)))
+                (status (or (alist-get 'status seg) "completed"))
+                (label (agent-bridge-tool-label name input))
+                (in-progress (member status '("pending" "running")))
+                (status-icon
+                 (cond
+                  ((member status '("pending" "running")) "&#9696;")
+                  ((equal status "failed") "&#10007;")
+                  (t "&#9654;")))
+                (status-class
+                 (cond
+                  ((member status '("pending" "running")) "running")
+                  ((equal status "failed") "failed")
+                  (t "completed"))))
            (setq last-tool-label label)
            (push (format
-                  (concat "<details class=\"tool-use\">"
-                          "<summary>&#9654; %s</summary>"
+                  (concat "<details class=\"tool-use%s\">"
+                          "<summary>"
+                          "<span class=\"status-indicator %s\">%s</span>"
+                          " %s</summary>"
                           "<pre>%s</pre></details>\n")
+                  (if in-progress " in-progress" "")
+                  (agent-web--html-escape status-class)
+                  status-icon
                   (agent-web--html-escape label)
                   (agent-web--html-escape
                    (truncate-string-to-width input 2000)))
                  parts)))
         ('tool-result
          (let* ((is-error (alist-get 'error seg))
+                (diff-old (alist-get 'diff-old seg))
+                (diff-new (alist-get 'diff-new seg))
+                (diff-file (alist-get 'diff-file seg))
                 (label (concat (if is-error "error" "result")
                                (when last-tool-label
                                  (concat ": " last-tool-label)))))
@@ -200,11 +279,49 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
            (push (format
                   (concat "<details class=\"tool-result%s\">"
                           "<summary>%s</summary>"
+                          "%s"
                           "<pre>%s</pre></details>\n")
                   (if is-error " error" "")
                   (agent-web--html-escape label)
+                  (if (or diff-old diff-new)
+                      (concat
+                       "<div class=\"diff-block\">"
+                       (when diff-file
+                         (format "<div class=\"diff-file\">%s</div>"
+                                 (agent-web--html-escape diff-file)))
+                       (when diff-old
+                         (format "<div class=\"diff-old\"><pre>%s</pre></div>"
+                                 (agent-web--html-escape
+                                  (truncate-string-to-width diff-old 3000))))
+                       (when diff-new
+                         (format "<div class=\"diff-new\"><pre>%s</pre></div>"
+                                 (agent-web--html-escape
+                                  (truncate-string-to-width diff-new 3000))))
+                       "</div>")
+                    "")
                   (agent-web--html-escape
                    (truncate-string-to-width (alist-get 'text seg) 2000)))
+                 parts)))
+        ('plan
+         (let* ((entries (alist-get 'entries seg))
+                (items
+                 (mapconcat
+                  (lambda (entry)
+                    (let* ((st (or (map-elt entry 'status) "pending"))
+                           (content (or (map-elt entry 'content) ""))
+                           (icon (cond
+                                  ((equal st "completed") "&#9989;")
+                                  ((equal st "in_progress") "&#128992;")
+                                  (t "&#9898;"))))
+                      (format "<li><span class=\"plan-status\">%s</span> %s</li>"
+                              icon (agent-web--html-escape content))))
+                  entries "")))
+           (push (format
+                  (concat "<details open class=\"tool-use\">"
+                          "<summary>Plan</summary>"
+                          "<ul class=\"plan-list\">%s</ul>"
+                          "</details>\n")
+                  items)
                  parts)))
         ('result
          (push (format "<div class=\"result\"><hr>%s</div>\n"
@@ -262,7 +379,7 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
         " font-size: 0.85em; margin: 2px; }\n"
         "button:hover { background: #1a3a5c; }\n"
         ".idle { color: #66bb6a; }\n"
-        ".busy, .running { color: #ffa726; }\n"
+        ".busy, .running, .waiting { color: #ffa726; }\n"
         ".exited, .error, .completed { color: #ef5350; }\n"
         ".no-agent, .no-session { color: #888; }\n"
         "</style>\n"
@@ -328,88 +445,129 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
 
 ;;; Route: GET /session/DIR
 
+(defun agent-web--render-usage-bar (buf)
+  "Render HTML usage bar for agent-shell BUF, or empty string."
+  (let ((usage (agent-bridge-usage buf)))
+    (if (not usage) ""
+      (let* ((used (or (map-elt usage :context-used) 0))
+             (size (or (map-elt usage :context-size) 1))
+             (pct (min 100.0 (* 100.0 (/ (float used) size))))
+             (cost (or (map-elt usage :cost-amount) 0))
+             (currency (or (map-elt usage :cost-currency) "$"))
+             (bar-color (cond
+                         ((>= pct 85) "#ef5350")
+                         ((>= pct 60) "#ffa726")
+                         (t "#66bb6a"))))
+        (format (concat
+                 "<span class=\"usage-bar\">"
+                 "<span class=\"usage-bar-track\">"
+                 "<span class=\"usage-bar-fill\""
+                 " style=\"width:%.0f%%;background:%s\"></span>"
+                 "</span>"
+                 " %.0f%% ctx"
+                 " &middot; %s%.2f"
+                 "</span>")
+                pct bar-color pct currency cost)))))
+
 (defun agent-web--handle-session (request)
   "Render a session view."
   (with-slots (process headers) request
     (let* ((path (cdr (assoc :GET headers)))
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
-           (session (agent-pipe-find-session nil dir))
+           (buf (agent-bridge-find-buffer dir))
            (enc (agent-web--encode-dir dir))
-           (status (if session
-                       (symbol-name (agent-pipe-session-status session))
-                     "no-session"))
-           (segments (and session
-                         (agent-pipe-session-history-segments session)))
-           (running-p (and session
-                           (eq (agent-pipe-session-status session) 'running))))
+           (status (agent-bridge-status buf))
+           (busy-p (member status '("busy" "waiting"))))
       (agent-web--respond
        process
        (agent-web--html-page
         (format "Session: %s" (abbreviate-file-name dir))
         (concat
          "<div class=\"actions\" style=\"margin-bottom:1em\">"
-         (format "<span class=\"%s\">%s</span> "
+         (format "<span class=\"%s\">%s</span>"
                  (agent-web--html-escape status)
                  (agent-web--html-escape status))
+         (agent-web--render-usage-bar buf)
+         " "
          (format "<form method=\"POST\" action=\"/session/%s/start\">" enc)
          "<button>New Session</button></form>"
          (format "<form method=\"POST\" action=\"/session/%s/interrupt\">" enc)
          "<button>Interrupt</button></form>"
-         (format "<a href=\"/history/%s\">" enc)
-         "<button>Resume History</button></a>"
          "</div>\n"
          "<div class=\"output\">"
-         (cond
-          (segments
-           (concat (agent-web--render-segments-html segments)
-                   (when running-p
-                     "<p class=\"busy\">Agent is running...</p>")))
-          (session
-           (let ((output (agent-pipe-session-output-text session)))
-             (if (string-empty-p output)
-                 "<pre>(no output yet)</pre>"
-               (format "<pre>%s</pre>"
-                       (agent-web--html-escape output)))))
-          (t "<pre>(no session)</pre>"))
-         "</div>\n"
-         ;; Pending permission request
-         (let ((perm (and session
-                          (agent-pipe-session-pending-permission session))))
-           (if perm
+         (let ((segments (and buf (agent-bridge-segments buf))))
+           (if segments
                (concat
-                "<div class=\"denials\" style=\"margin:1em 0;"
-                " padding:1em; border:1px solid #ffa726;"
-                " background:#2a1a00\">\n"
-                "<p style=\"color:#ffa726; margin:0 0 0.5em\">"
-                "Permission requested:</p>\n"
-                (format "<div>%s</div>\n"
-                        (agent-web--html-escape
-                         (alist-get 'description perm)))
-                (format (concat
-                         "<form method=\"POST\""
-                         " action=\"/session/%s/approve\""
-                         " style=\"display:inline\">"
-                         "<button style=\"border-color:#66bb6a;"
-                         " margin-top:0.5em\">Allow</button>"
-                         "</form>\n"
-                         "<form method=\"POST\""
-                         " action=\"/session/%s/deny\""
-                         " style=\"display:inline\">"
-                         "<button style=\"border-color:#ef5350;"
-                         " margin-top:0.5em\">Deny</button>"
-                         "</form>\n")
-                        enc enc)
-                "</div>\n")
+                (agent-web--render-segments-html segments)
+                (when busy-p
+                  "<p class=\"busy\">Agent is working...</p>"))
+             (if buf
+                 (let ((output (agent-bridge-buffer-text buf)))
+                   (if (or (null output) (string-empty-p output))
+                       "<pre>(no output yet)</pre>"
+                     (concat
+                      (format "<pre>%s</pre>"
+                              (agent-web--html-escape output))
+                      (when busy-p
+                        "<p class=\"busy\">Agent is working...</p>"))))
+               "<pre>(no session)</pre>")))
+         "</div>\n"
+         ;; Pending permission requests
+         (let ((perms (and buf (agent-bridge-pending-permissions buf))))
+           (if perms
+               (mapconcat
+                (lambda (perm)
+                  (let ((tc-id (alist-get 'tool-call-id perm))
+                        (title (alist-get 'title perm)))
+                    (concat
+                     "<div class=\"denials\" style=\"margin:1em 0;"
+                     " padding:1em; border:1px solid #ffa726;"
+                     " background:#2a1a00\">\n"
+                     "<p style=\"color:#ffa726; margin:0 0 0.5em\">"
+                     "Permission requested:</p>\n"
+                     (format "<div>%s</div>\n"
+                             (agent-web--html-escape title))
+                     (format (concat
+                              "<form method=\"POST\""
+                              " action=\"/session/%s/approve/%s\""
+                              " style=\"display:inline\">"
+                              "<button style=\"border-color:#66bb6a;"
+                              " margin-top:0.5em\">Allow</button>"
+                              "</form>\n"
+                              "<form method=\"POST\""
+                              " action=\"/session/%s/deny/%s\""
+                              " style=\"display:inline\">"
+                              "<button style=\"border-color:#ef5350;"
+                              " margin-top:0.5em\">Deny</button>"
+                              "</form>\n")
+                             enc (url-hexify-string tc-id)
+                             enc (url-hexify-string tc-id))
+                     "</div>\n")))
+                perms "")
              ""))
-         (if running-p ""
+         (if busy-p ""
            (concat
             (format "<form method=\"POST\" action=\"/session/%s/send\">\n" enc)
             "<textarea name=\"prompt\" placeholder=\"Enter prompt...\""
             " autofocus></textarea><br>\n"
             "<button type=\"submit\">Send</button>\n"
-            "</form>\n")))
-        (when running-p 3) dir)))))
+            "</form>\n"))
+         (let ((cmds (append (agent-bridge-commands buf) nil)))
+           (if cmds
+               (concat
+                "<details style=\"margin-top:1.5em\">\n"
+                "<summary style=\"color:#888;cursor:pointer\">Slash commands</summary>\n"
+                "<table style=\"margin-top:0.5em;font-size:0.85em\">\n"
+                (mapconcat
+                 (lambda (cmd)
+                   (format "<tr><td style=\"color:#4fc3f7;padding-right:1em\">/%s</td><td>%s</td></tr>"
+                           (agent-web--html-escape (or (map-elt cmd 'name) ""))
+                           (agent-web--html-escape (or (map-elt cmd 'description) ""))))
+                 cmds "\n")
+                "\n</table>\n</details>\n")
+             "")))
+        (when busy-p 3) dir)))))
 
 ;;; Route: POST /session/DIR/send
 
@@ -421,61 +579,51 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
            (dir (agent-web--decode-dir (nth 1 segs)))
            (prompt (or (cdr (assoc "prompt" headers)) ""))
            (enc (agent-web--encode-dir dir))
-           (session (agent-pipe-ensure-session nil nil dir)))
+           (buf (agent-bridge-ensure dir)))
       (when (not (string-empty-p prompt))
-        (agent-pipe-send prompt session))
+        (agent-bridge-send prompt buf))
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: POST /session/DIR/approve
 
 (defun agent-web--handle-approve (request)
-  "Approve a pending permission request via control protocol."
+  "Approve a pending permission request."
   (with-slots (process headers) request
     (let* ((path (cdr (assoc :POST headers)))
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
+           (tc-id (url-unhex-string (nth 3 segs)))
            (enc (agent-web--encode-dir dir))
-           (session (agent-pipe-find-session nil dir)))
-      (when session
-        (let ((perm (agent-pipe-session-pending-permission session)))
-          (when perm
-            (agent-pipe--send-permission-response
-             session (alist-get 'request-id perm) t
-             (alist-get 'input perm))
-            (setf (agent-pipe-session-pending-permission session) nil)
-            (agent-pipe--insert-output session "[allowed]\n" 'success))))
+           (buf (agent-bridge-find-buffer dir)))
+      (when (and buf tc-id)
+        (agent-bridge-approve buf tc-id))
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: POST /session/DIR/deny
 
 (defun agent-web--handle-deny (request)
-  "Deny a pending permission request via control protocol."
+  "Deny a pending permission request."
   (with-slots (process headers) request
     (let* ((path (cdr (assoc :POST headers)))
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
+           (tc-id (url-unhex-string (nth 3 segs)))
            (enc (agent-web--encode-dir dir))
-           (session (agent-pipe-find-session nil dir)))
-      (when session
-        (let ((perm (agent-pipe-session-pending-permission session)))
-          (when perm
-            (agent-pipe--send-permission-response
-             session (alist-get 'request-id perm) nil
-             (alist-get 'input perm))
-            (setf (agent-pipe-session-pending-permission session) nil)
-            (agent-pipe--insert-output session "[denied]\n" 'warning))))
+           (buf (agent-bridge-find-buffer dir)))
+      (when (and buf tc-id)
+        (agent-bridge-deny buf tc-id))
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: POST /session/DIR/start
 
 (defun agent-web--handle-start (request)
-  "Start a new agent-pipe session."
+  "Start a new agent session."
   (with-slots (process headers) request
     (let* ((path (cdr (assoc :POST headers)))
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
            (enc (agent-web--encode-dir dir)))
-      (agent-pipe-ensure-session nil nil dir)
+      (agent-bridge-ensure dir)
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: POST /session/DIR/interrupt
@@ -487,21 +635,21 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
            (enc (agent-web--encode-dir dir))
-           (session (agent-pipe-find-session nil dir)))
-      (when session
-        (agent-pipe-interrupt session))
+           (buf (agent-bridge-find-buffer dir)))
+      (when buf
+        (agent-bridge-interrupt buf))
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: GET /history/DIR
 
 (defun agent-web--handle-history (request)
-  "Show resumable sessions for a directory."
+  "Show past sessions for a directory."
   (with-slots (process headers) request
     (let* ((path (cdr (assoc :GET headers)))
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
            (enc (agent-web--encode-dir dir))
-           (sessions (agent-pipe--scan-sessions dir))
+           (sessions (agent-bridge--scan-sessions dir))
            (rows
             (mapconcat
              (lambda (s)
@@ -512,7 +660,7 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
                                    (alist-get 'first-prompt s)
                                    "-"))
                       (date-str (if mtime
-                                    (agent-pipe--format-session-date mtime)
+                                    (agent-bridge--format-session-date mtime)
                                   "-")))
                  (concat
                   "<tr>"
@@ -522,38 +670,64 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
                           (agent-web--html-escape
                            (truncate-string-to-width summary 80)))
                   "<td>"
-                  (format "<form method=\"POST\" action=\"/session/%s/resume/%s\">"
+                  (format (concat
+                           "<form method=\"POST\""
+                           " action=\"/session/%s/resume/%s\">"
+                           "<button>Resume</button></form>")
                           enc (url-hexify-string sid))
-                  "<button>Resume</button></form></td>"
+                  "</td>"
                   "</tr>")))
              sessions "\n")))
       (agent-web--respond
        process
        (agent-web--html-page
-        (format "History: %s" (abbreviate-file-name dir))
+        (format "Sessions: %s" (abbreviate-file-name dir))
         (if sessions
             (concat
              "<table>\n"
              "<tr><th>Date</th><th>Branch</th><th>Summary</th><th></th></tr>\n"
              rows "\n</table>")
-          "<p>No resumable sessions found.</p>")
+          "<p>No past sessions found.</p>")
         nil dir)))))
 
 ;;; Route: POST /session/DIR/resume/SID
 
 (defun agent-web--handle-resume (request)
-  "Resume a past session.
-Loads history and redirects to the session view where the user can
-type a follow-up prompt."
+  "Resume a past session by ID."
   (with-slots (process headers) request
     (let* ((path (cdr (assoc :POST headers)))
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
            (sid (url-unhex-string (nth 3 segs)))
-           (enc (agent-web--encode-dir dir))
-           (session (agent-pipe-ensure-session nil nil dir)))
-      (agent-pipe-resume-session session sid)
+           (enc (agent-web--encode-dir dir)))
+      (agent-bridge-resume dir sid)
       (agent-web--redirect process (format "/session/%s" enc)))))
+
+;;; Route: GET /session/DIR/view/SID
+
+(defun agent-web--handle-view-session (request)
+  "View a past session as read-only conversation."
+  (with-slots (process headers) request
+    (let* ((path (cdr (assoc :GET headers)))
+           (segs (agent-web--path-segments path))
+           (dir (agent-web--decode-dir (nth 1 segs)))
+           (sid (url-unhex-string (nth 3 segs)))
+           (sessions-dir (agent-bridge--claude-sessions-dir dir))
+           (file (expand-file-name (concat sid ".jsonl") sessions-dir)))
+      (agent-web--respond
+       process
+       (agent-web--html-page
+        (format "Session: %s" (truncate-string-to-width sid 8))
+        (if (file-readable-p file)
+            (let ((segments (agent-bridge-parse-session-history file)))
+              (concat
+               (format "<p><a href=\"/history/%s\">&larr; Back to history</a></p>\n"
+                       (agent-web--encode-dir dir))
+               "<div class=\"output\">"
+               (agent-web--render-segments-html segments)
+               "</div>"))
+          "<p>Session file not found.</p>")
+        nil dir)))))
 
 ;;; Route: GET /create/REPO
 
@@ -654,16 +828,8 @@ type a follow-up prompt."
       (agent-web--redirect process "/"))))
 
 (defun agent-web--find-agent-buffer (dir)
-  "Find a live agent-pipe buffer for DIR."
-  (let ((target (file-truename (expand-file-name dir))))
-    (cl-find-if
-     (lambda (buf)
-       (and (buffer-live-p buf)
-            (with-current-buffer buf
-              (and (derived-mode-p 'agent-pipe-mode)
-                   (file-directory-p default-directory)
-                   (file-equal-p default-directory target)))))
-     (buffer-list))))
+  "Find a live agent-shell buffer for DIR."
+  (agent-bridge-find-buffer dir))
 
 ;;; Server lifecycle
 
@@ -684,9 +850,9 @@ type a follow-up prompt."
               . agent-web--handle-session)
              ((:POST . "^/session/[^/]+/send$")
               . agent-web--handle-send)
-             ((:POST . "^/session/[^/]+/approve$")
+             ((:POST . "^/session/[^/]+/approve/[^/]+$")
               . agent-web--handle-approve)
-             ((:POST . "^/session/[^/]+/deny$")
+             ((:POST . "^/session/[^/]+/deny/[^/]+$")
               . agent-web--handle-deny)
              ((:POST . "^/session/[^/]+/start$")
               . agent-web--handle-start)
@@ -694,12 +860,14 @@ type a follow-up prompt."
               . agent-web--handle-interrupt)
              ((:GET  . "^/history/[^/]+$")
               . agent-web--handle-history)
-             ((:POST . "^/session/[^/]+/resume/.+$")
-              . agent-web--handle-resume)
+             ((:GET  . "^/session/[^/]+/view/.+$")
+              . agent-web--handle-view-session)
              ((:GET  . "^/create/[^/]+$")
               . agent-web--handle-create-form)
              ((:POST . "^/create/[^/]+$")
               . agent-web--handle-create)
+             ((:POST . "^/session/[^/]+/resume/.+$")
+              . agent-web--handle-resume)
              ((:POST . "^/delete/[^/]+$")
               . agent-web--handle-delete))
            p))
