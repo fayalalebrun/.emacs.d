@@ -711,19 +711,19 @@
 (use-package web-server
   :ensure t)
 
-(use-package agent-pipe
+(use-package agent-bridge
   :load-path "lisp"
-  :commands (agent-pipe-start agent-pipe-send agent-pipe-resume agent-pipe-continue))
+  :after (agent-shell))
 
 (use-package agent-board
   :load-path "lisp"
-  :after (agent-pipe magit)
+  :after (agent-bridge magit)
   :commands (agent-board)
   :bind ("C-c w" . agent-board))
 
 (use-package agent-web
   :load-path "lisp"
-  :after (agent-board agent-pipe web-server)
+  :after (agent-board agent-bridge web-server)
   :commands (agent-web-start agent-web-stop))
 
 (use-package ai-code
@@ -932,7 +932,7 @@
      "%latex -interaction nonstopmode -output-directory %o %f"))
  '(org-startup-truncated nil)
  '(package-selected-packages
-   '(ag age agent-shell agent-shell-manager ai-code auctex
+   '(ag age agent-shell ai-code auctex
 	bash-completion cargo clang-format claude-code code-cells
 	comint-mime company deadgrep eat ement emms envrc
 	exec-path-from-shell eyebrowse flycheck glsl-mode haskell-mode

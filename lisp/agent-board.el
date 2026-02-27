@@ -13,10 +13,10 @@
 (declare-function magit-worktree-checkout "magit-worktree")
 (declare-function magit-worktree-delete "magit-worktree")
 
-(require 'agent-pipe)
+(require 'agent-bridge)
 
 (cl-defstruct agent-board-workspace
-  "A worktree with optional agent-pipe session buffer."
+  "A worktree with optional agent session buffer."
   project toplevel branch worktree buffer primary-p task)
 
 (defvar agent-board--refresh-timer nil
@@ -47,41 +47,29 @@ Returns nil if DIR does not exist or is not in a git repo."
 
 (defun agent-board--status (ws)
   "Return status string for workspace WS."
-  (let ((buf (agent-board-workspace-buffer ws)))
-    (cond
-     ((or (null buf) (not (buffer-live-p buf)))
-      "no-agent")
-     (t
-      (let ((session (buffer-local-value 'agent-pipe--session-ref buf)))
-        (pcase (and session (agent-pipe-session-status session))
-          ('running "busy")
-          ('error   "exited")
-          (_        "idle")))))))
+  (agent-bridge-status (agent-board-workspace-buffer ws)))
 
 (defun agent-board--status-face (status)
   "Return face for STATUS string."
   (pcase status
-    ("idle"   'success)
-    ("busy"   'warning)
-    ("exited" 'error)
-    (_        'shadow)))
+    ("idle"     'success)
+    ("busy"     'warning)
+    ("waiting"  'warning)
+    ("exited"   'error)
+    ("starting" 'font-lock-comment-face)
+    (_          'shadow)))
 
-(defun agent-board--agent-pipe-buffers ()
-  "Return all live agent-pipe session buffers."
-  (cl-remove-if-not
-   (lambda (buf)
-     (and (buffer-live-p buf)
-          (with-current-buffer buf
-            (derived-mode-p 'agent-pipe-mode))))
-   (buffer-list)))
+(defun agent-board--agent-buffers ()
+  "Return all live agent-shell session buffers."
+  (agent-shell-buffers))
 
 (defun agent-board--discover-repos ()
-  "Return alist of (REPO-ROOT . AI-BUFS) for all repos with agent-pipe sessions.
+  "Return alist of (REPO-ROOT . AI-BUFS) for all repos with agent-shell sessions.
 Also includes pinned repos added via `agent-board'.
 REPO-ROOT is the canonical primary worktree path."
-  (let ((ai-bufs (agent-board--agent-pipe-buffers))
+  (let ((ai-bufs (agent-board--agent-buffers))
         (repos (make-hash-table :test 'equal)))
-    ;; Group agent-pipe buffers by their canonical repo root.
+    ;; Group agent-shell buffers by their canonical repo root.
     (dolist (buf ai-bufs)
       (let* ((dir (buffer-local-value 'default-directory buf))
              (root (and dir (agent-board--repo-root dir))))
@@ -97,7 +85,7 @@ REPO-ROOT is the canonical primary worktree path."
       result)))
 
 (defun agent-board--build-workspaces ()
-  "Build list of workspace structs from all repos with agent-pipe sessions."
+  "Build list of workspace structs from all repos with agent sessions."
   (let ((repos (agent-board--discover-repos))
         result)
     (dolist (repo repos)
@@ -203,7 +191,7 @@ that a timer-driven refresh does not move the user's cursor."
     (unless ws (user-error "No workspace at point"))
     (let ((dir (file-truename (agent-board-workspace-worktree ws)))
           (board-buf (current-buffer)))
-      (agent-pipe-start nil nil dir)
+      (agent-bridge-start dir)
       (run-with-timer 0.5 nil (lambda ()
                                 (when (buffer-live-p board-buf)
                                   (with-current-buffer board-buf
@@ -228,14 +216,9 @@ that a timer-driven refresh does not move the user's cursor."
   (let ((ws (agent-board--workspace-at-point)))
     (unless ws (user-error "No workspace at point"))
     (let ((buf (agent-board-workspace-buffer ws)))
-      (cond
-       ((and buf (buffer-live-p buf) (get-buffer-process buf))
-        (let ((session (buffer-local-value 'agent-pipe--session-ref buf)))
-          (when session
-            (agent-pipe-interrupt session)))
-        (agent-board-refresh))
-       (t
-        (user-error "No running agent to interrupt"))))))
+      (if (and buf (buffer-live-p buf))
+          (progn (agent-bridge-interrupt buf) (agent-board-refresh))
+        (user-error "No running agent to interrupt")))))
 
 (defun agent-board-set-task ()
   "Set the task description for the branch at point.
@@ -286,7 +269,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
           (board-buf (current-buffer)))
       (run-with-timer 1.5 nil
                       (lambda ()
-                        (agent-pipe-start nil nil dir)
+                        (agent-bridge-start dir)
                         (when (buffer-live-p board-buf)
                           (with-current-buffer board-buf
                             (agent-board-refresh))))))))
@@ -344,6 +327,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
          "  " (propertize "idle"     'face 'success) "      Waiting for input\n"
          "  " (propertize "busy"     'face 'warning) "      Agent is working\n"
          "  " (propertize "exited"   'face 'error)   "    Process has ended\n"
+         "  " (propertize "waiting"  'face 'warning) "   Permission requested\n"
          "  " (propertize "no-agent" 'face 'shadow)  "  No agent for worktree\n"))
       (goto-char (point-min))
       (special-mode))
