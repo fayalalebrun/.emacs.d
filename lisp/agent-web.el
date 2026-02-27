@@ -79,9 +79,6 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
    "<!DOCTYPE html>\n<html>\n<head>\n"
    "<meta charset=\"utf-8\">\n"
    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-   "<script src=\"https://cdn.jsdelivr.net/npm/marked/marked.min.js\"></script>\n"
-   "<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css\">\n"
-   "<script src=\"https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js\"></script>\n"
    "<title>" (agent-web--html-escape title) "</title>\n"
    "<style>\n"
    "body { font-family: monospace; margin: 0; display: flex;"
@@ -123,7 +120,7 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
    "summary { cursor: pointer; color: #888; }\n"
    "details pre { color: #999; }\n"
    ".user-prompt { margin: 1em 0 0.5em; }\n"
-   ".assistant-text { white-space: pre-wrap; word-wrap: break-word; }\n"
+   ".assistant-text { }\n"
    ".tool-use summary, .tool-result summary { font-size: 0.9em; }\n"
    ".tool-result.error summary { color: #ef5350; }\n"
    ".result { margin-top: 1em; color: #a5d6a7; }\n"
@@ -168,26 +165,6 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
    "}\n"
    "</style>\n"
    (if refresh (format "<meta http-equiv=\"refresh\" content=\"%d\">\n" refresh) "")
-   "<script>\n"
-   "addEventListener('DOMContentLoaded',function(){\n"
-   " if(typeof marked!=='undefined'&&typeof katex!=='undefined'){\n"
-   "  marked.use({extensions:[{name:'math',level:'inline',\n"
-   "   start:function(src){return src.indexOf('$');},\n"
-   "   tokenizer:function(src){\n"
-   "    var b=src.match(/^\\$\\$([\\s\\S]+?)\\$\\$/);\n"
-   "    if(b)return{type:'math',raw:b[0],text:b[1],display:true};\n"
-   "    var i=src.match(/^\\$([^$\\n]+?)\\$/);\n"
-   "    if(i)return{type:'math',raw:i[0],text:i[1],display:false};\n"
-   "   },\n"
-   "   renderer:function(token){\n"
-   "    return katex.renderToString(token.text,\n"
-   "     {displayMode:token.display,throwOnError:false});\n"
-   "   }}]});\n"
-   " }\n"
-   " document.querySelectorAll('.assistant-text').forEach(function(el){\n"
-   "  if(typeof marked!=='undefined')\n"
-   "   el.innerHTML=marked.parse(el.textContent)})});\n"
-   "</script>\n"
    "</head>\n<body>\n"
    "<div class=\"sidebar-col\">\n"
    "<a href=\"/\" class=\"dash-link\">&larr; Dashboard</a>\n"
@@ -214,13 +191,67 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
   "Split URL PATH into segments."
   (split-string path "/" t))
 
+;;; Markdown rendering (server-side via pandoc)
+
+(defvar agent-web--md-separator "\n\n<!-- AGENTSEP -->\n\n"
+  "Separator inserted between markdown texts for batch pandoc rendering.")
+
+(defvar agent-web--html-separator-re "\\(?:<p>\\)?<!-- AGENTSEP -->\\(?:</p>\\)?"
+  "Regexp matching the separator in pandoc HTML output.")
+
+(defun agent-web--render-markdown-batch (texts)
+  "Render a list of markdown TEXTS to HTML in a single pandoc call.
+Returns a list of HTML strings in the same order.  Empty/nil texts
+produce empty strings without invoking pandoc."
+  (let ((non-empty-indices nil)
+        (non-empty-texts nil))
+    ;; Collect non-empty texts and their indices
+    (dotimes (i (length texts))
+      (let ((text (nth i texts)))
+        (when (and text (not (string-empty-p text)))
+          (push i non-empty-indices)
+          (push text non-empty-texts))))
+    (setq non-empty-indices (nreverse non-empty-indices))
+    (setq non-empty-texts (nreverse non-empty-texts))
+    (if (null non-empty-texts)
+        (make-list (length texts) "")
+      ;; Batch render: join with separator, one pandoc call, split
+      (let* ((joined (mapconcat #'identity non-empty-texts
+                                agent-web--md-separator))
+             (rendered
+              (with-temp-buffer
+                (insert joined)
+                (call-process-region (point-min) (point-max)
+                                     "nix-shell" t t nil
+                                     "-p" "pandoc" "--run"
+                                     "pandoc -f markdown -t html --mathml")
+                (buffer-string)))
+             (html-parts (split-string rendered agent-web--html-separator-re))
+             (result (make-list (length texts) "")))
+        ;; Map rendered parts back to their original indices
+        (dotimes (i (length non-empty-indices))
+          (when (nth i html-parts)
+            (setf (nth (nth i non-empty-indices) result)
+                  (string-trim (nth i html-parts)))))
+        result))))
+
 ;;; Output rendering
 
 (defun agent-web--render-segments-html (segments)
   "Render display SEGMENTS as HTML."
-  (let ((parts nil)
-        (last-tool-label nil))
+  ;; Batch-render all text segments in a single pandoc call.
+  ;; text-contents has one entry per segment (nil for non-text types).
+  ;; rendered-texts has the same length, with rendered HTML at matching indices.
+  (let* ((text-contents (mapcar (lambda (seg)
+                                  (when (eq (alist-get 'type seg) 'text)
+                                    (or (alist-get 'text seg) "")))
+                                segments))
+         (rendered-texts (agent-web--render-markdown-batch text-contents))
+         (seg-idx -1)
+         (parts nil)
+         (last-tool-label nil))
     (dolist (seg segments)
+      (cl-incf seg-idx)
       (pcase (alist-get 'type seg)
         ('prompt
          (push (format "<div class=\"user-prompt\"><strong>&gt; %s</strong></div>\n"
@@ -228,7 +259,7 @@ ACTIVE-DIR highlights the matching workspace in the sidebar."
                parts))
         ('text
          (push (format "<div class=\"assistant-text\">%s</div>\n"
-                       (agent-web--html-escape (alist-get 'text seg)))
+                       (nth seg-idx rendered-texts))
                parts))
         ('thought
          (push (format
