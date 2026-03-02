@@ -713,7 +713,10 @@
 
 (use-package agent-bridge
   :load-path "lisp"
-  :after (agent-shell))
+  :after (agent-shell)
+  :config
+  (setq agent-shell-preferred-agent-config 'codex)
+  (setq agent-shell-session-strategy 'prompt))
 
 (use-package agent-board
   :load-path "lisp"

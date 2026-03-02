@@ -235,6 +235,31 @@ produce empty strings without invoking pandoc."
                   (string-trim (nth i html-parts)))))
         result))))
 
+;;; Backend selector
+
+(defun agent-web--render-backend-select (&optional name)
+  "Render an HTML <select> for available agent backends.
+NAME is the form field name (default \"backend\")."
+  (let* ((field (or name "backend"))
+         (configs agent-shell-agent-configs)
+         (preferred (or agent-shell-preferred-agent-config 'claude-code)))
+    (concat
+     (format "<select name=\"%s\"" (agent-web--html-escape field))
+     " style=\"background:#0f0f23;color:#e0e0e0;border:1px solid #333;"
+     "padding:0.4em;font-family:monospace\">\n"
+     (mapconcat
+      (lambda (config)
+        (let* ((id (map-elt config :identifier))
+               (label (or (map-elt config :mode-line-name)
+                          (symbol-name id)))
+               (selected (eq id preferred)))
+          (format "<option value=\"%s\"%s>%s</option>"
+                  (agent-web--html-escape (symbol-name id))
+                  (if selected " selected" "")
+                  (agent-web--html-escape label))))
+      configs "\n")
+     "\n</select>")))
+
 ;;; Output rendering
 
 (defun agent-web--render-segments-html (segments)
@@ -522,9 +547,12 @@ produce empty strings without invoking pandoc."
          (agent-web--render-usage-bar buf)
          " "
          (format "<form method=\"POST\" action=\"/session/%s/start\">" enc)
+         (agent-web--render-backend-select)
          "<button>New Session</button></form>"
          (format "<form method=\"POST\" action=\"/session/%s/interrupt\">" enc)
          "<button>Interrupt</button></form>"
+         (format "<a href=\"/history/%s\">" enc)
+         "<button>Sessions</button></a>"
          "</div>\n"
          "<div class=\"output\">"
          (let ((segments (and buf (agent-bridge-segments buf))))
@@ -610,7 +638,7 @@ produce empty strings without invoking pandoc."
            (dir (agent-web--decode-dir (nth 1 segs)))
            (prompt (or (cdr (assoc "prompt" headers)) ""))
            (enc (agent-web--encode-dir dir))
-           (buf (agent-bridge-ensure dir)))
+           (buf (agent-bridge-ensure dir nil 'new)))
       (when (not (string-empty-p prompt))
         (agent-bridge-send prompt buf))
       (agent-web--redirect process (format "/session/%s" enc)))))
@@ -653,8 +681,11 @@ produce empty strings without invoking pandoc."
     (let* ((path (cdr (assoc :POST headers)))
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
-           (enc (agent-web--encode-dir dir)))
-      (agent-bridge-ensure dir)
+           (enc (agent-web--encode-dir dir))
+           (backend (cdr (assoc "backend" headers)))
+           (config (when (and backend (not (string-empty-p backend)))
+                     (intern backend))))
+      (agent-bridge-ensure dir config 'new)
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: POST /session/DIR/interrupt
@@ -680,26 +711,23 @@ produce empty strings without invoking pandoc."
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
            (enc (agent-web--encode-dir dir))
-           (sessions (agent-bridge--scan-sessions dir))
+           (sessions (agent-bridge-list-sessions dir))
            (rows
             (mapconcat
              (lambda (s)
-               (let* ((sid (alist-get 'id s))
-                      (mtime (alist-get 'mtime s))
-                      (branch (or (alist-get 'git-branch s) "-"))
-                      (summary (or (alist-get 'summary s)
-                                   (alist-get 'first-prompt s)
-                                   "-"))
-                      (date-str (if mtime
-                                    (agent-bridge--format-session-date mtime)
+               (let* ((sid (map-elt s 'sessionId))
+                      (title (or (map-elt s 'title) "-"))
+                      (modified (agent-bridge--parse-iso-time
+                                 (map-elt s 'lastModifiedAt)))
+                      (date-str (if modified
+                                    (agent-bridge--format-session-date modified)
                                   "-")))
                  (concat
                   "<tr>"
                   (format "<td>%s</td>" (agent-web--html-escape date-str))
-                  (format "<td>%s</td>" (agent-web--html-escape branch))
                   (format "<td>%s</td>"
                           (agent-web--html-escape
-                           (truncate-string-to-width summary 80)))
+                           (truncate-string-to-width title 80)))
                   "<td>"
                   (format (concat
                            "<form method=\"POST\""
@@ -716,7 +744,7 @@ produce empty strings without invoking pandoc."
         (if sessions
             (concat
              "<table>\n"
-             "<tr><th>Date</th><th>Branch</th><th>Summary</th><th></th></tr>\n"
+             "<tr><th>Date</th><th>Title</th><th></th></tr>\n"
              rows "\n</table>")
           "<p>No past sessions found.</p>")
         nil dir)))))
@@ -799,6 +827,9 @@ produce empty strings without invoking pandoc."
          " style=\"width:100%;background:#0f0f23;color:#e0e0e0;"
          "border:1px solid #333;padding:0.4em;font-family:monospace\">"
          "</label><br><br>\n"
+         "<label>Agent backend<br>"
+         (agent-web--render-backend-select)
+         "</label><br><br>\n"
          "<button type=\"submit\">Create</button>\n"
          "</form>"))))))
 
@@ -813,6 +844,9 @@ produce empty strings without invoking pandoc."
            (branch (or (cdr (assoc "branch" headers)) ""))
            (start-point (or (cdr (assoc "start-point" headers)) ""))
            (task (or (cdr (assoc "task" headers)) ""))
+           (backend (cdr (assoc "backend" headers)))
+           (config (when (and backend (not (string-empty-p backend)))
+                     (intern backend)))
            (default-directory toplevel)
            (worktree-dir (expand-file-name
                           branch
@@ -831,7 +865,11 @@ produce empty strings without invoking pandoc."
                  (not (string= branch "(detached)")))
         (magit-call-git "config"
                         (format "branch.%s.description" branch) task))
-      (agent-web--redirect process "/"))))
+      ;; Start a session with the selected backend
+      (agent-bridge-ensure worktree-dir config 'new)
+      (agent-web--redirect
+       process (format "/session/%s"
+                       (agent-web--encode-dir worktree-dir))))))
 
 ;;; Route: POST /delete/DIR
 

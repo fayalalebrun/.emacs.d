@@ -17,8 +17,26 @@
 (require 'map)
 (require 'seq)
 (require 'json)
+(require 'acp)
 (require 'agent-shell)
 (require 'agent-shell-anthropic)
+
+(defun agent-bridge--resolve-config (&optional config)
+  "Resolve CONFIG to a full agent-shell configuration alist.
+CONFIG can be a symbol identifier, a full alist, or nil.
+Resolution order: CONFIG arg, `agent-shell-preferred-agent-config',
+fallback to Claude Code."
+  (cond
+   ;; Full alist passed directly
+   ((and config (listp config)) config)
+   ;; Symbol identifier — look up in agent-shell-agent-configs
+   ((and config (symbolp config))
+    (or (seq-find (lambda (c) (eq (map-elt c :identifier) config))
+                  agent-shell-agent-configs)
+        (agent-shell-anthropic-make-claude-code-config)))
+   ;; No arg — use agent-shell's own preferred config
+   (t (or (agent-shell--resolve-preferred-config)
+          (agent-shell-anthropic-make-claude-code-config)))))
 
 ;;;; Buffer lookup
 
@@ -56,17 +74,28 @@ One of: idle, busy, waiting, exited, starting, no-agent."
 
 ;;;; Session management
 
-(defun agent-bridge-start (dir)
-  "Start an agent-shell session for DIR.  Returns the buffer."
+(defun agent-bridge-start (dir &optional config session-strategy)
+  "Start an agent-shell session for DIR.  Returns the buffer.
+Optional CONFIG is a backend identifier symbol or full config alist.
+Optional SESSION-STRATEGY overrides `agent-shell-session-strategy'
+buffer-locally (pass \\='new for non-interactive contexts like web
+handlers where `completing-read' would hang).  When nil the global
+value is used, allowing interactive session selection."
   (let* ((default-directory (file-name-as-directory (expand-file-name dir)))
-         (buf (agent-shell-start
-               :config (agent-shell-anthropic-make-claude-code-config))))
+         (buf (agent-shell--start
+               :config (agent-bridge--resolve-config config)
+               :no-focus t
+               :new-session t
+               :session-strategy session-strategy)))
     (agent-bridge-clear-segments buf)
     buf))
 
-(defun agent-bridge-ensure (dir)
-  "Get or create an agent-shell buffer for DIR."
-  (or (agent-bridge-find-buffer dir) (agent-bridge-start dir)))
+(defun agent-bridge-ensure (dir &optional config session-strategy)
+  "Get or create an agent-shell buffer for DIR.
+Optional CONFIG and SESSION-STRATEGY are passed to `agent-bridge-start'
+if a new session is needed."
+  (or (agent-bridge-find-buffer dir)
+      (agent-bridge-start dir config session-strategy)))
 
 ;;;; Prompt / interrupt
 
@@ -354,20 +383,22 @@ ACP-SESSIONS is the list of ACP session alists."
 (advice-add 'agent-shell--prompt-select-session :around
             #'agent-bridge--advice-prompt-select-session)
 
-(defun agent-bridge-resume (dir session-id)
-  "Start or return an agent-shell buffer for DIR, resuming SESSION-ID.
-If a live buffer already exists for DIR, return it unchanged."
-  (or (agent-bridge-find-buffer dir)
-      (let* ((default-directory (file-name-as-directory (expand-file-name dir)))
-             (buf (agent-shell--start
-                   :config (agent-shell-anthropic-make-claude-code-config)
-                   :no-focus t
-                   :new-session t
-                   :session-strategy 'prompt)))
-        (with-current-buffer buf
-          (setq-local agent-bridge--resume-session-id session-id))
-        (agent-bridge-clear-segments buf)
-        buf)))
+(defun agent-bridge-resume (dir session-id &optional config)
+  "Kill any existing agent-shell buffer for DIR and start a new one
+that resumes SESSION-ID via the session-select advice.
+Optional CONFIG is a backend identifier symbol or full config alist."
+  (when-let ((existing (agent-bridge-find-buffer dir)))
+    (kill-buffer existing))
+  (let* ((default-directory (file-name-as-directory (expand-file-name dir)))
+         (buf (agent-shell--start
+               :config (agent-bridge--resolve-config config)
+               :no-focus t
+               :new-session t
+               :session-strategy 'prompt)))
+    (with-current-buffer buf
+      (setq-local agent-bridge--resume-session-id session-id))
+    (agent-bridge-clear-segments buf)
+    buf))
 
 ;;;; Buffer text extraction
 
@@ -379,102 +410,52 @@ If a live buffer already exists for DIR, return it unchanged."
 
 ;;;; Session history (Claude Code JSONL files)
 
-(defvar agent-bridge--session-metadata-cache (make-hash-table :test 'equal)
-  "Cache of (file . mtime) -> parsed session metadata alist.")
-
 (defun agent-bridge--claude-sessions-dir (directory)
   "Return the Claude Code sessions directory for DIRECTORY."
   (let* ((abs (directory-file-name (expand-file-name directory)))
          (encoded (replace-regexp-in-string "[/._]" "-" abs)))
     (expand-file-name encoded "~/.claude/projects/")))
 
-(defun agent-bridge--parse-session-head (file)
-  "Parse the first few lines and tail of session FILE for metadata.
-Returns an alist with keys: id, first-prompt, summary, git-branch, timestamp."
-  (let ((file-size (file-attribute-size (file-attributes file)))
-        session-id first-prompt git-branch timestamp summary)
-    ;; Read the head for session ID, first prompt, branch, timestamp
-    (with-temp-buffer
-      (insert-file-contents file nil 0 (min 8192 file-size))
-      (goto-char (point-min))
-      (dotimes (_ 5)
-        (unless (eobp)
-          (let* ((line (buffer-substring-no-properties
-                        (point) (line-end-position)))
-                 (json (ignore-errors
-                         (json-parse-string line :object-type 'alist
-                                            :array-type 'list
-                                            :null-object nil
-                                            :false-object nil))))
-            (when json
-              (unless session-id
-                (setq session-id (alist-get 'sessionId json)))
-              (unless timestamp
-                (setq timestamp (alist-get 'timestamp json)))
-              (unless git-branch
-                (setq git-branch (alist-get 'gitBranch json)))
-              (when (and (not first-prompt)
-                         (equal (alist-get 'type json) "user"))
-                (let ((content (alist-get 'content
-                                          (alist-get 'message json))))
-                  (when (stringp content)
-                    (setq first-prompt content))))))
-          (forward-line 1))))
-    ;; Read the tail for summary
-    (when (> file-size 512)
-      (with-temp-buffer
-        (insert-file-contents file nil (- file-size 512) file-size)
-        (goto-char (point-max))
-        (forward-line -3)
-        (while (not (eobp))
-          (let* ((line (buffer-substring-no-properties
-                        (point) (line-end-position)))
-                 (json (ignore-errors
-                         (json-parse-string line :object-type 'alist
-                                            :array-type 'list
-                                            :null-object nil
-                                            :false-object nil))))
-            (when (and json (equal (alist-get 'type json) "summary"))
-              (setq summary (alist-get 'summary json))))
-          (forward-line 1))))
-    (unless session-id
-      (setq session-id (file-name-sans-extension
-                        (file-name-nondirectory file))))
-    `((id . ,session-id)
-      (first-prompt . ,first-prompt)
-      (summary . ,summary)
-      (git-branch . ,git-branch)
-      (timestamp . ,timestamp))))
+;;;; ACP session list
 
-(defun agent-bridge--scan-sessions (directory)
-  "Scan Claude Code session files for DIRECTORY.
-Returns a list of alists sorted by mtime (newest first),
-each with keys: id, file, mtime, size, first-prompt, summary,
-git-branch, timestamp."
-  (let* ((sessions-dir (agent-bridge--claude-sessions-dir directory))
-         (files (and (file-directory-p sessions-dir)
-                     (directory-files sessions-dir t
-                                     "^[0-9a-f].*\\.jsonl\\'")))
-         results)
-    (dolist (file files)
-      (let* ((attrs (file-attributes file))
-             (mtime (file-attribute-modification-time attrs))
-             (size (file-attribute-size attrs))
-             (cache-key (cons file mtime))
-             (cached (gethash cache-key agent-bridge--session-metadata-cache))
-             (metadata (or cached
-                          (let ((parsed (agent-bridge--parse-session-head file)))
-                            (puthash cache-key parsed
-                                     agent-bridge--session-metadata-cache)
-                            parsed))))
-        (push (append metadata
-                      `((file . ,file)
-                        (mtime . ,mtime)
-                        (size . ,size)))
-              results)))
-    (sort results (lambda (a b)
-                    (time-less-p (alist-get 'mtime b)
-                                 (alist-get 'mtime a))))))
+(defun agent-bridge--parse-iso-time (iso-string)
+  "Parse ISO-STRING to Emacs time value, or nil."
+  (when (and iso-string (stringp iso-string) (not (string-empty-p iso-string)))
+    (condition-case nil
+        (date-to-time iso-string)
+      (error nil))))
+
+(defun agent-bridge-list-sessions (dir)
+  "List ACP sessions for DIR.
+Spawns an agent-shell buffer if none exists.  Returns a list of
+session alists with keys: sessionId, title, cwd, createdAt, lastModifiedAt."
+  (let ((buf (agent-bridge-ensure dir nil 'new)))
+    (with-current-buffer buf
+      ;; Wait for ACP client readiness
+      (let ((deadline (+ (float-time) 15)))
+        (while (and (< (float-time) deadline)
+                    (not (map-elt agent-shell--state :client)))
+          (accept-process-output nil 0.1)))
+      (let ((client (map-elt agent-shell--state :client)))
+        (when client
+          ;; Wait for session-list capability
+          (let ((deadline (+ (float-time) 10)))
+            (while (and (< (float-time) deadline)
+                        (not (map-elt agent-shell--state :supports-session-list)))
+              (accept-process-output nil 0.1)))
+          (when (map-elt agent-shell--state :supports-session-list)
+            (let ((done nil) result)
+              (acp-send-request
+               :client client
+               :request (acp-make-session-list-request :cwd default-directory)
+               :on-success (lambda (resp)
+                             (setq result (append (map-elt resp 'sessions) nil)
+                                   done t))
+               :on-failure (lambda (_err) (setq done t)))
+              (let ((deadline (+ (float-time) 10)))
+                (while (and (not done) (< (float-time) deadline))
+                  (accept-process-output nil 0.1)))
+              result)))))))
 
 (defun agent-bridge--format-session-date (time)
   "Format TIME as a human-friendly relative date string."
