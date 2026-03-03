@@ -112,6 +112,9 @@ if a new session is needed."
 (defvar-local agent-bridge--permission-options nil
   "Alist: tool-call-id -> list of ACP option alists.")
 
+(defvar-local agent-bridge--permission-options-by-request-id nil
+  "Alist: request-id -> list of ACP option alists.")
+
 ;;;; Segment accumulator
 
 (defvar-local agent-bridge--segments nil
@@ -282,22 +285,32 @@ Reads live data from `agent-shell--state' :usage."
 (defun agent-bridge--capture-permission-options (&rest args)
   "Advice :before `agent-shell--on-request' to capture permission options.
 ARGS are the keyword arguments: :state STATE :request REQUEST."
-  (let* ((request (plist-get args :request))
+  (let* ((request (or (plist-get args :acp-request)
+                      (plist-get args :request)))
          (method (map-elt request 'method)))
     (when (equal method "session/request_permission")
       (let* ((params (map-elt request 'params))
+             (request-id (map-elt request 'id))
              (tool-call (map-elt params 'toolCall))
              (tool-call-id (map-elt tool-call 'toolCallId))
              (options (map-elt params 'options))
              (state (plist-get args :state))
              (buf (map-elt state :buffer)))
-        (when (and buf (buffer-live-p buf) tool-call-id options)
+        (when (and buf (buffer-live-p buf) options)
           (with-current-buffer buf
             (unless agent-bridge--permission-options
               (setq agent-bridge--permission-options nil))
-            (setf (alist-get tool-call-id agent-bridge--permission-options
-                             nil nil #'equal)
-                  options)))))))
+            (unless agent-bridge--permission-options-by-request-id
+              (setq agent-bridge--permission-options-by-request-id nil))
+            (when tool-call-id
+              (setf (alist-get tool-call-id agent-bridge--permission-options
+                               nil nil #'equal)
+                    options))
+            (when request-id
+              (setf (alist-get request-id
+                               agent-bridge--permission-options-by-request-id
+                               nil nil #'equal)
+                    options))))))))
 
 (advice-add 'agent-shell--on-request :before #'agent-bridge--capture-permission-options)
 
@@ -320,45 +333,131 @@ Each alist has keys: tool-call-id, request-id, title, kind."
            tool-calls)
           (nreverse result))))))
 
-(defun agent-bridge-approve (buf tool-call-id)
-  "Approve permission for TOOL-CALL-ID in BUF."
+(defun agent-bridge--normalize-id (id)
+  "Normalize ID to a string for robust map lookups."
+  (cond
+   ((null id) nil)
+   ((stringp id) id)
+   ((symbolp id) (symbol-name id))
+   ((numberp id) (number-to-string id))
+   (t (format "%s" id))))
+
+(defun agent-bridge--find-tool-call-by-id (state tool-call-id)
+  "Find tool call in STATE matching TOOL-CALL-ID.
+Returns a cons of (RESOLVED-ID . TOOL-CALL-DATA), or nil."
+  (let* ((tool-calls (map-elt state :tool-calls))
+         (exact (and tool-call-id (map-elt tool-calls tool-call-id))))
+    (cond
+     (exact (cons tool-call-id exact))
+     ((null tool-call-id) nil)
+     (t
+      (let ((target (agent-bridge--normalize-id tool-call-id))
+            found)
+        (map-do
+         (lambda (tc-id tc-data)
+           (when (and (not found)
+                      (string= (agent-bridge--normalize-id tc-id) target))
+             (setq found (cons tc-id tc-data))))
+         tool-calls)
+        found)))))
+
+(defun agent-bridge--find-tool-call-by-request-id (state request-id)
+  "Find tool call in STATE matching REQUEST-ID.
+Returns a cons of (RESOLVED-ID . TOOL-CALL-DATA), or nil."
+  (when request-id
+    (let* ((tool-calls (map-elt state :tool-calls))
+           (target (agent-bridge--normalize-id request-id))
+           found)
+      (map-do
+       (lambda (tc-id tc-data)
+         (when (and (not found)
+                    (string= (agent-bridge--normalize-id
+                              (map-elt tc-data :permission-request-id))
+                             target))
+           (setq found (cons tc-id tc-data))))
+       tool-calls)
+      found)))
+
+(defun agent-bridge--lookup-permission-options (tool-call-id request-id)
+  "Lookup permission options using TOOL-CALL-ID and REQUEST-ID."
+  (or (and tool-call-id
+           (alist-get tool-call-id agent-bridge--permission-options
+                      nil nil #'equal))
+      (and request-id
+           (alist-get request-id agent-bridge--permission-options-by-request-id
+                      nil nil #'equal))
+      (let ((target-tc (agent-bridge--normalize-id tool-call-id))
+            (target-req (agent-bridge--normalize-id request-id))
+            found)
+        (dolist (pair agent-bridge--permission-options found)
+          (when (and target-tc
+                     (string= (agent-bridge--normalize-id (car pair))
+                              target-tc))
+            (setq found (cdr pair))))
+        (unless found
+          (dolist (pair agent-bridge--permission-options-by-request-id found)
+            (when (and target-req
+                       (string= (agent-bridge--normalize-id (car pair))
+                                target-req))
+              (setq found (cdr pair))))))))
+
+(defun agent-bridge-approve (buf tool-call-id &optional request-id)
+  "Approve permission for TOOL-CALL-ID in BUF.
+REQUEST-ID, when provided, is used as fallback resolver."
   (with-current-buffer buf
     (let* ((state agent-shell--state)
            (client (map-elt state :client))
-           (tc-data (map-elt (map-elt state :tool-calls) tool-call-id))
-           (request-id (map-elt tc-data :permission-request-id))
-           (options (alist-get tool-call-id agent-bridge--permission-options
-                               nil nil #'equal))
+           (entry (or (agent-bridge--find-tool-call-by-id state tool-call-id)
+                      (agent-bridge--find-tool-call-by-request-id state request-id)))
+           (resolved-tool-call-id (car-safe entry))
+           (tc-data (cdr-safe entry))
+           ;; Prefer the original request-id value from agent-shell state
+           ;; to preserve type (number/string) expected by ACP responses.
+           (resolved-request-id (or (map-elt tc-data :permission-request-id)
+                                    request-id))
+           (options (agent-bridge--lookup-permission-options
+                     resolved-tool-call-id resolved-request-id))
            (option-id
             (or (cl-loop for opt in (append options nil)
                          when (equal (map-elt opt 'kind) "allow_once")
                          return (map-elt opt 'optionId))
                 ;; Fallback: first option
                 (map-elt (car (append options nil)) 'optionId))))
-      (when (and client request-id option-id)
+      (if (and client resolved-request-id option-id)
         (agent-shell--send-permission-response
          :client client
-         :request-id request-id
+         :request-id resolved-request-id
          :option-id option-id
          :state state
-         :tool-call-id tool-call-id
-         :message-text "Allowed")))))
+         :tool-call-id resolved-tool-call-id
+         :message-text "Allowed")
+        (message "agent-bridge: could not approve permission (tc=%S req=%S)"
+                 tool-call-id request-id)))))
 
-(defun agent-bridge-deny (buf tool-call-id)
-  "Deny permission for TOOL-CALL-ID in BUF."
+(defun agent-bridge-deny (buf tool-call-id &optional request-id)
+  "Deny permission for TOOL-CALL-ID in BUF.
+REQUEST-ID, when provided, is used as fallback resolver."
   (with-current-buffer buf
     (let* ((state agent-shell--state)
            (client (map-elt state :client))
-           (tc-data (map-elt (map-elt state :tool-calls) tool-call-id))
-           (request-id (map-elt tc-data :permission-request-id)))
-      (when (and client request-id)
+           (entry (or (agent-bridge--find-tool-call-by-id state tool-call-id)
+                      (agent-bridge--find-tool-call-by-request-id state request-id)))
+           (resolved-tool-call-id (car-safe entry))
+           (tc-data (cdr-safe entry))
+           ;; Prefer the original request-id value from agent-shell state
+           ;; to preserve type (number/string) expected by ACP responses.
+           (resolved-request-id (or (map-elt tc-data :permission-request-id)
+                                    request-id)))
+      (if (and client resolved-request-id)
         (agent-shell--send-permission-response
          :client client
-         :request-id request-id
+         :request-id resolved-request-id
          :cancelled t
          :state state
-         :tool-call-id tool-call-id
-         :message-text "Denied")))))
+         :tool-call-id resolved-tool-call-id
+         :message-text "Denied")
+        (message "agent-bridge: could not deny permission (tc=%S req=%S)"
+                 tool-call-id request-id)))))
 
 ;;;; Resume support
 
@@ -367,12 +466,7 @@ Each alist has keys: tool-call-id, request-id, title, kind."
 
 (defun agent-bridge--normalize-session-id (session-id)
   "Return SESSION-ID as a plain string for reliable comparisons."
-  (cond
-   ((null session-id) nil)
-   ((stringp session-id) session-id)
-   ((symbolp session-id) (symbol-name session-id))
-   ((numberp session-id) (number-to-string session-id))
-   (t (format "%s" session-id))))
+  (agent-bridge--normalize-id session-id))
 
 (defun agent-bridge--advice-prompt-select-session (orig-fn acp-sessions)
   "Intercept session selection when `agent-bridge--resume-session-id' is set.

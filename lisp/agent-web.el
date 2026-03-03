@@ -576,8 +576,9 @@ NAME is the form field name (default \"backend\")."
          (let ((perms (and buf (agent-bridge-pending-permissions buf))))
            (if perms
                (mapconcat
-                (lambda (perm)
+               (lambda (perm)
                   (let ((tc-id (alist-get 'tool-call-id perm))
+                        (req-id (alist-get 'request-id perm))
                         (title (alist-get 'title perm)))
                     (concat
                      "<div class=\"denials\" style=\"margin:1em 0;"
@@ -589,19 +590,21 @@ NAME is the form field name (default \"backend\")."
                              (agent-web--html-escape title))
                      (format (concat
                               "<form method=\"POST\""
-                              " action=\"/session/%s/approve/%s\""
+                              " action=\"/session/%s/approve/%s/%s\""
                               " style=\"display:inline\">"
                               "<button style=\"border-color:#66bb6a;"
                               " margin-top:0.5em\">Allow</button>"
                               "</form>\n"
                               "<form method=\"POST\""
-                              " action=\"/session/%s/deny/%s\""
+                              " action=\"/session/%s/deny/%s/%s\""
                               " style=\"display:inline\">"
                               "<button style=\"border-color:#ef5350;"
                               " margin-top:0.5em\">Deny</button>"
                               "</form>\n")
-                             enc (url-hexify-string tc-id)
-                             enc (url-hexify-string tc-id))
+                             enc (url-hexify-string (format "%s" tc-id))
+                             (url-hexify-string (format "%s" req-id))
+                             enc (url-hexify-string (format "%s" tc-id))
+                             (url-hexify-string (format "%s" req-id)))
                      "</div>\n")))
                 perms "")
              ""))
@@ -652,10 +655,12 @@ NAME is the form field name (default \"backend\")."
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
            (tc-id (url-unhex-string (nth 3 segs)))
+           (req-id (when (nth 4 segs)
+                     (url-unhex-string (nth 4 segs))))
            (enc (agent-web--encode-dir dir))
            (buf (agent-bridge-find-buffer dir)))
       (when (and buf tc-id)
-        (agent-bridge-approve buf tc-id))
+        (agent-bridge-approve buf tc-id req-id))
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: POST /session/DIR/deny
@@ -667,10 +672,12 @@ NAME is the form field name (default \"backend\")."
            (segs (agent-web--path-segments path))
            (dir (agent-web--decode-dir (nth 1 segs)))
            (tc-id (url-unhex-string (nth 3 segs)))
+           (req-id (when (nth 4 segs)
+                     (url-unhex-string (nth 4 segs))))
            (enc (agent-web--encode-dir dir))
            (buf (agent-bridge-find-buffer dir)))
       (when (and buf tc-id)
-        (agent-bridge-deny buf tc-id))
+        (agent-bridge-deny buf tc-id req-id))
       (agent-web--redirect process (format "/session/%s" enc)))))
 
 ;;; Route: POST /session/DIR/start
@@ -919,9 +926,9 @@ NAME is the form field name (default \"backend\")."
               . agent-web--handle-session)
              ((:POST . "^/session/[^/]+/send$")
               . agent-web--handle-send)
-             ((:POST . "^/session/[^/]+/approve/[^/]+$")
+             ((:POST . "^/session/[^/]+/approve/[^/]+\\(/[^/]+\\)?$")
               . agent-web--handle-approve)
-             ((:POST . "^/session/[^/]+/deny/[^/]+$")
+             ((:POST . "^/session/[^/]+/deny/[^/]+\\(/[^/]+\\)?$")
               . agent-web--handle-deny)
              ((:POST . "^/session/[^/]+/start$")
               . agent-web--handle-start)
