@@ -10,7 +10,6 @@
 (show-paren-mode 1)
 (toggle-truncate-lines)
 (setq visible-bell t)
-(add-to-list 'load-path (expand-file-name "~/.emacs.d/lisp"))
 
 (require 'package)
 (add-to-list 'package-archives
@@ -249,6 +248,16 @@
   :bind (("C-x g" . magit-status))	   
 )
 (global-set-key (kbd "C-x g") 'magit-status)
+
+(defun my-ensure-global-edit-keys ()
+  "Reassert core global editing keys.
+Some packages/modes can transiently remap these during startup."
+  (global-set-key (kbd "C-w") #'kill-region)
+  (global-set-key (kbd "M-w") #'kill-ring-save))
+
+;; Set now (covers reloads) and once more at end of startup (covers late remaps).
+(my-ensure-global-edit-keys)
+(add-hook 'emacs-startup-hook #'my-ensure-global-edit-keys t)
 
 
 (use-package pdf-tools
@@ -510,6 +519,7 @@
    minibuffer-local-completion-map))
 
 (use-package acme-mode
+  :load-path "lisp"
   :config
   (add-to-list 'auto-mode-alist '(".acme$" . acme-mode))
   )
@@ -720,9 +730,8 @@
 
 (use-package agent-board
   :load-path "lisp"
-  :after (agent-bridge magit)
   :commands (agent-board)
-  :bind ("C-c w" . agent-board))
+  :bind (("C-c w" . agent-board)))
 
 (use-package agent-web
   :load-path "lisp"
@@ -808,6 +817,7 @@
   
   (message "Configuration reloaded successfully!"))
 
+(add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 (require 'workspace-utils)
 
 (custom-set-variables
@@ -935,16 +945,16 @@
      "%latex -interaction nonstopmode -output-directory %o %f"))
  '(org-startup-truncated nil)
  '(package-selected-packages
-   '(ag age agent-shell ai-code auctex
-	bash-completion cargo clang-format claude-code code-cells
-	comint-mime company deadgrep eat ement emms envrc
-	exec-path-from-shell eyebrowse flycheck glsl-mode haskell-mode
-	helm-lsp helm-projectile helm-tramp lsp-metals lsp-pyright
-	lsp-ui lua-mode neotree nix-ts-mode no-littering org-download
-	org-roam pdf-tools pgmacs platformio-mode prettier prodigy
-	quelpa-use-package rust-mode sbt-mode scala-ts-mode separedit
-	shell-command-x toml-mode typst-preview typst-ts-mode
-	web-server xelb yasnippet))
+   '(ag age agent-shell agent-shell-manager ai-code auctex cargo
+	clang-format claude-code code-cells comint-mime company dash
+	deadgrep eat ement emms envrc exec-path-from-shell eyebrowse
+	flycheck glsl-mode haskell-mode helm-lsp helm-projectile
+	helm-tramp lsp-metals lsp-pyright lsp-ui lua-mode neotree
+	nix-ts-mode no-littering org-download org-roam pdf-tools
+	pgmacs platformio-mode prettier prodigy quelpa-use-package
+	rust-mode sbt-mode scala-ts-mode separedit shell-command-x
+	toml-mode typst-preview typst-ts-mode web-server xelb
+	yasnippet))
  '(pdf-tools-handle-upgrades nil)
  '(safe-local-variable-directories
    '("/home/fal/Sync/rtlking/" "/home/fal/Default Folder/rtlking/"

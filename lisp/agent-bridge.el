@@ -365,6 +365,15 @@ Each alist has keys: tool-call-id, request-id, title, kind."
 (defvar-local agent-bridge--resume-session-id nil
   "Target ACP session ID to resume; consumed once by session-select advice.")
 
+(defun agent-bridge--normalize-session-id (session-id)
+  "Return SESSION-ID as a plain string for reliable comparisons."
+  (cond
+   ((null session-id) nil)
+   ((stringp session-id) session-id)
+   ((symbolp session-id) (symbol-name session-id))
+   ((numberp session-id) (number-to-string session-id))
+   (t (format "%s" session-id))))
+
 (defun agent-bridge--advice-prompt-select-session (orig-fn acp-sessions)
   "Intercept session selection when `agent-bridge--resume-session-id' is set.
 ORIG-FN is the original `agent-shell--prompt-select-session'.
@@ -374,10 +383,17 @@ ACP-SESSIONS is the list of ACP session alists."
            agent-bridge--resume-session-id)
       (let ((target agent-bridge--resume-session-id))
         (setq agent-bridge--resume-session-id nil)
-        (or (cl-find-if (lambda (s)
-                          (equal (map-elt s 'sessionId) target))
-                        acp-sessions)
-            (car acp-sessions)))
+        (let* ((target-id (agent-bridge--normalize-session-id target))
+               (match (cl-find-if (lambda (s)
+                                   (string= (agent-bridge--normalize-session-id
+                                             (map-elt s 'sessionId))
+                                            target-id))
+                                 acp-sessions)))
+          (or match
+              (progn
+                (message "No matching session found for ID %s; starting a new session."
+                         target-id)
+                nil))))
     (funcall orig-fn acp-sessions)))
 
 (advice-add 'agent-shell--prompt-select-session :around

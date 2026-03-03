@@ -234,10 +234,35 @@ Stored as the git branch description."
         (user-error "Cannot set task on a detached HEAD"))
       (let ((default-directory toplevel)
             (key (format "branch.%s.description" branch)))
-        (if (string-empty-p task)
-            (magit-call-git "config" "--unset" key)
-          (magit-call-git "config" key task)))
+      (if (string-empty-p task)
+          (magit-call-git "config" "--unset" key)
+        (magit-call-git "config" key task)))
       (agent-board-refresh))))
+
+(defun agent-board-set-default-agent ()
+  "Set default `agent-shell' backend for future shells.
+
+This changes only future shells; existing shells are not restarted."
+  (interactive)
+  (let* ((choices (cons (cons "Prompt each time (default)" nil)
+                        (mapcar
+                         (lambda (config)
+                           (let* ((identifier (map-elt config :identifier))
+                                  (buffer-name (map-elt config :buffer-name))
+                                  (mode-line-name (map-elt config :mode-line-name))
+                                  (name (or mode-line-name buffer-name "Unknown agent"))
+                                  (id (if identifier
+                                          (symbol-name identifier)
+                                        "custom")))
+                             (cons (format "%s (%s)" name id) identifier)))
+                         agent-shell-agent-configs)))
+         (selection (completing-read "Default agent: "
+                                    (mapcar #'car choices)
+                                    nil t))
+         (value (cdr (assoc selection choices))))
+    (setq agent-shell-preferred-agent-config value)
+    (message "Default agent set to: %s" (or (and value (symbol-name value))
+                                            "prompt each time"))))
 
 (defun agent-board-create ()
   "Create a new worktree, then start an agent there.
@@ -314,6 +339,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
          (propertize "Keybindings" 'face 'bold) "\n"
          "  RET      Jump to agent buffer at point\n"
          "  g        Refresh\n"
+         "  a        Set default agent for future shells\n"
          "  t        Set task (git branch description)\n"
          "  k        Kill agent (keep worktree)\n"
          "  c        Create workspace (new worktree + agent)\n"
@@ -351,6 +377,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
 (define-key agent-board-mode-map (kbd "r") #'agent-board-restart)
 (define-key agent-board-mode-map (kbd "d") #'agent-board-delete)
 (define-key agent-board-mode-map (kbd "t") #'agent-board-set-task)
+(define-key agent-board-mode-map (kbd "a") #'agent-board-set-default-agent)
 (define-key agent-board-mode-map (kbd "C-c C-c") #'agent-board-interrupt)
 (define-key agent-board-mode-map (kbd "G") #'agent-board-magit)
 (define-key agent-board-mode-map (kbd "q") #'quit-window)
