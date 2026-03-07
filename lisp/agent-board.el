@@ -63,6 +63,61 @@ Returns nil if DIR does not exist or is not in a git repo."
   "Return all live agent-shell session buffers."
   (agent-shell-buffers))
 
+(defun agent-board--live-process (buf)
+  "Return the live agent process for agent-shell BUF, or nil.
+Prefer the ACP client process when available, since the buffer process
+may just be the local transport shim."
+  (when (and buf (buffer-live-p buf))
+    (with-current-buffer buf
+      (let* ((client-proc (and (boundp 'agent-shell--state)
+                               (map-elt (map-elt agent-shell--state :client)
+                                        :process)))
+             (proc (or client-proc (get-buffer-process buf))))
+        (and proc (process-live-p proc) proc)))))
+
+(defun agent-board--process-snapshot ()
+  "Return a snapshot of system process attributes and child links."
+  (let ((attrs (make-hash-table :test 'eql))
+        (children (make-hash-table :test 'eql)))
+    (dolist (pid (list-system-processes))
+      (let ((info (ignore-errors (process-attributes pid))))
+        (when info
+          (puthash pid info attrs)
+          (let ((ppid (alist-get 'ppid info)))
+            (when (integerp ppid)
+              (puthash ppid (cons pid (gethash ppid children)) children))))))
+    (list :attrs attrs :children children)))
+
+(defun agent-board--process-subtree-rss-kib (pid snapshot &optional seen)
+  "Return cumulative RSS in KiB for PID and its descendants.
+SNAPSHOT should come from `agent-board--process-snapshot'."
+  (let ((seen (or seen (make-hash-table :test 'eql))))
+    (if (or (null pid) (gethash pid seen))
+        0
+      (progn
+        (puthash pid t seen)
+        (+ (or (alist-get 'rss (gethash pid (plist-get snapshot :attrs))) 0)
+           (cl-loop for child in (gethash pid (plist-get snapshot :children))
+                    sum (agent-board--process-subtree-rss-kib child snapshot seen)))))))
+
+(defun agent-board--process-rss-kib (proc snapshot)
+  "Return PROC cumulative resident memory usage in KiB, or nil.
+Includes PROC and all of its descendants using SNAPSHOT."
+  (let ((pid (and proc (process-id proc))))
+    (when pid
+      (agent-board--process-subtree-rss-kib pid snapshot))))
+
+(defun agent-board--format-rss-kib (rss-kib)
+  "Format RSS-KIB as a human-readable memory string."
+  (cond
+   ((null rss-kib) "-")
+   ((>= rss-kib (* 1024 1024))
+    (format "%.1f GiB" (/ rss-kib 1048576.0)))
+   ((>= rss-kib 1024)
+    (format "%.1f MiB" (/ rss-kib 1024.0)))
+   (t
+    (format "%d KiB" rss-kib))))
+
 (defun agent-board--discover-repos ()
   "Return alist of (REPO-ROOT . AI-BUFS) for all repos with agent-shell sessions.
 Also includes pinned repos added via `agent-board'.
@@ -128,20 +183,28 @@ REPO-ROOT is the canonical primary worktree path."
 
 (defun agent-board--entries ()
   "Return `tabulated-list-entries' for the board."
-  (let ((workspaces (agent-board--build-workspaces)))
+  (let ((workspaces (agent-board--build-workspaces))
+        (snapshot (agent-board--process-snapshot)))
     (clrhash agent-board--workspaces)
     (mapcar
      (lambda (ws)
        (let* ((status (agent-board--status ws))
-              (path (agent-board-workspace-worktree ws)))
-         (puthash path ws agent-board--workspaces)
-         (list path
-               (vector
-                (propertize status 'face (agent-board--status-face status))
-                (agent-board-workspace-project ws)
-                (or (agent-board-workspace-task ws) "-")
-                (agent-board-workspace-branch ws)
-                (abbreviate-file-name path)))))
+              (path (agent-board-workspace-worktree ws))
+              (proc (agent-board--live-process
+                     (agent-board-workspace-buffer ws)))
+              (pid (and proc (process-id proc)))
+              (memory (agent-board--format-rss-kib
+                       (agent-board--process-rss-kib proc snapshot))))
+          (puthash path ws agent-board--workspaces)
+          (list path
+                (vector
+                 (propertize status 'face (agent-board--status-face status))
+                 (agent-board-workspace-project ws)
+                 (or (agent-board-workspace-task ws) "-")
+                 (agent-board-workspace-branch ws)
+                 (if pid (number-to-string pid) "-")
+                 memory
+                 (abbreviate-file-name path)))))
      workspaces)))
 
 
@@ -390,10 +453,12 @@ Uses the repo of the workspace at point, or prompts for a directory."
 \\{agent-board-mode-map}"
   (setq tabulated-list-format
         [("Status"   10 t)
-         ("Project"  15 t)
-         ("Task"     50 t)
-         ("Branch"   25 t)
-         ("Worktree" 40 t)])
+          ("Project"  15 t)
+          ("Task"     40 t)
+          ("Branch"   20 t)
+          ("PID"       8 t)
+          ("Memory"   10 t)
+          ("Worktree" 34 t)])
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header)
   (let ((board-buf (current-buffer)))
