@@ -721,11 +721,86 @@ Some packages/modes can transiently remap these during startup."
 (use-package web-server
   :ensure t)
 
+(use-package agent-shell
+  :quelpa (agent-shell
+           :fetcher github
+           :repo "tempdragon/agent-shell"
+           :branch "fix-multi-req"
+           :commit "5192940712db7cae1cd51ccae6356fb15616e9b7"))
+
 (use-package agent-bridge
   :load-path "lisp"
   :after (agent-shell)
   :config
-  (setq agent-shell-preferred-agent-config 'codex)
+  (require 'subr-x)
+  (defvar my-agent-shell-opencode-last-model-file
+    (expand-file-name ".agent-shell/opencode-last-model-id" user-emacs-directory)
+    "State file storing the most recent OpenCode model id used in agent-shell.")
+  (defun my-agent-shell-opencode--read-last-model-id ()
+    "Return persisted OpenCode model id, or nil if unavailable."
+    (when (file-readable-p my-agent-shell-opencode-last-model-file)
+      (let ((value (with-temp-buffer
+                     (insert-file-contents my-agent-shell-opencode-last-model-file)
+                     (string-trim (buffer-string)))))
+        (unless (string-empty-p value) value))))
+  (defun my-agent-shell-opencode--write-last-model-id (model-id)
+    "Persist MODEL-ID for future new OpenCode sessions."
+    (make-directory (file-name-directory my-agent-shell-opencode-last-model-file) t)
+    (with-temp-file my-agent-shell-opencode-last-model-file
+      (insert model-id "\n")))
+  (defun my-agent-shell-opencode--persist-on-set-model-request (&rest args)
+    "Persist model id when OpenCode sends a session/set_model request."
+    (let* ((state (plist-get args :state))
+           (request (plist-get args :request))
+           (method (and request (map-elt request :method)))
+           (identifier (and state (map-nested-elt state '(:agent-config :identifier))))
+           (model-id (and request (map-nested-elt request '(:params modelId)))))
+      (when (and (eq identifier 'opencode)
+                 (string= method "session/set_model")
+                 (stringp model-id)
+                 (> (length model-id) 0))
+        (setq agent-shell-opencode-default-model-id model-id)
+        (my-agent-shell-opencode--write-last-model-id model-id))))
+  (defun my-agent-shell-opencode--sync-model-from-file-before-start (&rest _)
+    "Refresh OpenCode default model from disk before starting a shell."
+    (let ((model-id (my-agent-shell-opencode--read-last-model-id)))
+      (when model-id
+        (setq agent-shell-opencode-default-model-id model-id))))
+  (defun my-agent-shell-opencode-debug-state ()
+    "Show OpenCode model persistence state in the minibuffer."
+    (interactive)
+    (message "agent=%S default=%S session=%S file=%S set-model-advice=%S start-advice=%S"
+             (when (boundp 'agent-shell--state)
+               (map-nested-elt agent-shell--state '(:agent-config :identifier)))
+             (bound-and-true-p agent-shell-opencode-default-model-id)
+             (when (boundp 'agent-shell--state)
+               (map-nested-elt agent-shell--state '(:session :model-id)))
+             (my-agent-shell-opencode--read-last-model-id)
+             (advice-member-p #'my-agent-shell-opencode--persist-on-set-model-request
+                              #'agent-shell--send-request)
+             (advice-member-p #'my-agent-shell-opencode--sync-model-from-file-before-start
+                              #'agent-shell--start)))
+  (setq agent-shell-preferred-agent-config 'opencode)
+  (let ((model-id (my-agent-shell-opencode--read-last-model-id)))
+    (when model-id
+      (setq agent-shell-opencode-default-model-id model-id)))
+  ;; Remove old intrusive advice wrappers, then keep a lightweight observer.
+  (advice-remove 'agent-shell--set-session-from-response
+                 #'my-agent-shell-opencode--after-session-from-response)
+  (advice-remove 'agent-shell-set-session-model
+                 #'my-agent-shell-opencode--around-set-session-model)
+  (advice-remove 'agent-shell--set-default-model
+                 #'my-agent-shell-opencode--around-set-default-model)
+  (advice-remove 'agent-shell--update-header-and-mode-line
+                 #'my-agent-shell-opencode--remember-model)
+  (unless (advice-member-p #'my-agent-shell-opencode--sync-model-from-file-before-start
+                           #'agent-shell--start)
+    (advice-add 'agent-shell--start
+                :before #'my-agent-shell-opencode--sync-model-from-file-before-start))
+  (unless (advice-member-p #'my-agent-shell-opencode--persist-on-set-model-request
+                           #'agent-shell--send-request)
+    (advice-add 'agent-shell--send-request
+                :before #'my-agent-shell-opencode--persist-on-set-model-request))
   (setq agent-shell-session-strategy 'prompt))
 
 (use-package agent-board

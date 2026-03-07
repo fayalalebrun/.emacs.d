@@ -242,7 +242,7 @@ produce empty strings without invoking pandoc."
 NAME is the form field name (default \"backend\")."
   (let* ((field (or name "backend"))
          (configs agent-shell-agent-configs)
-         (preferred (or agent-shell-preferred-agent-config 'claude-code)))
+         (preferred (or agent-shell-preferred-agent-config 'opencode)))
     (concat
      (format "<select name=\"%s\"" (agent-web--html-escape field))
      " style=\"background:#0f0f23;color:#e0e0e0;border:1px solid #333;"
