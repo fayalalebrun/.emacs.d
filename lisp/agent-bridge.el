@@ -21,6 +21,10 @@
 (require 'agent-shell)
 (require 'agent-shell-anthropic)
 
+(defgroup agent-bridge nil
+  "Bridges agent-shell data into local dashboard and web tooling."
+  :group 'tools)
+
 (defun agent-bridge--resolve-config (&optional config)
   "Resolve CONFIG to a full agent-shell configuration alist.
 CONFIG can be a symbol identifier, a full alist, or nil.
@@ -137,6 +141,16 @@ Each segment is an alist with `type' key.  Same format as
 (defvar-local agent-bridge--activity-tracking-installed nil
   "Non-nil once agent activity tracking hooks are installed for this buffer.")
 
+(defvar-local agent-bridge--history-trim-in-progress nil
+  "Non-nil while this buffer is trimming old agent-shell interactions.")
+
+(defcustom agent-bridge-max-visible-interactions 8
+  "Maximum number of completed interactions to keep in an agent-shell buffer.
+When nil, automatic trimming is disabled.  Transcript files remain untouched."
+  :type '(choice (const :tag "Disabled" nil)
+                 integer)
+  :group 'agent-bridge)
+
 (defun agent-bridge--mark-buffer-change (&rest _)
   "Record that the current agent buffer changed just now."
   (setq agent-bridge--last-buffer-change-time (current-time)
@@ -174,6 +188,61 @@ Each segment is an alist with `type' key.  Same format as
       (let ((times (delq nil (list agent-bridge--last-output-time
                                    agent-bridge--last-buffer-change-time))))
         (car (last (sort times #'time-less-p)))))))
+
+(defun agent-bridge--trim-cutoff-position (keep-interactions)
+  "Return buffer position before which history can be trimmed.
+KEEP-INTERACTIONS is the number of most recent completed interactions to keep."
+  (when (and (integerp keep-interactions)
+             (> keep-interactions 0))
+    (save-excursion
+      (goto-char (point-max))
+      (let ((cutoff nil)
+            (found t))
+        (dotimes (_ (1+ keep-interactions))
+          (unless (ignore-errors (comint-previous-prompt 1))
+            (setq found nil))
+          (setq cutoff (and found (point))))
+        (and found
+             cutoff
+             (save-excursion
+               (goto-char cutoff)
+               (ignore-errors (comint-previous-prompt 1)))
+             (> cutoff (point-min))
+             cutoff)))))
+
+(defun agent-bridge-trim-buffer-history (&optional buf)
+  "Trim BUF to `agent-bridge-max-visible-interactions' recent interactions.
+If BUF is nil, trim the current buffer.  Only affects the visible Emacs buffer."
+  (when-let* ((buf (or buf (current-buffer)))
+              ((buffer-live-p buf)))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'agent-shell-mode)
+                 (not agent-bridge--history-trim-in-progress)
+                 (integerp agent-bridge-max-visible-interactions)
+                 (> agent-bridge-max-visible-interactions 0)
+                 (not (bound-and-true-p shell-maker--busy)))
+        (when-let ((cutoff (agent-bridge--trim-cutoff-position
+                            agent-bridge-max-visible-interactions)))
+          (let ((inhibit-read-only t)
+                (agent-bridge--history-trim-in-progress t))
+            (remove-text-properties (point-min)
+                                    cutoff
+                                    '(insert-in-front-hooks nil))
+            (remove-overlays (point-min) cutoff)
+            (delete-region (point-min) cutoff)
+            (goto-char (point-max))))))))
+
+(defun agent-bridge-trim-all-buffers ()
+  "Trim all live agent-shell buffers according to `agent-bridge-max-visible-interactions'."
+  (interactive)
+  (dolist (buf (agent-shell-buffers))
+    (agent-bridge-trim-buffer-history buf)))
+
+(defun agent-bridge--trim-after-finish-output (&rest _)
+  "Trim old history in agent-shell buffers after output finishes."
+  (agent-bridge-trim-buffer-history))
+
+(advice-add 'shell-maker-finish-output :after #'agent-bridge--trim-after-finish-output)
 
 (defun agent-bridge--finalize-chunk (buf)
   "Push current chunk as a segment in BUF and clear it."
