@@ -118,6 +118,22 @@ Includes PROC and all of its descendants using SNAPSHOT."
    (t
     (format "%d KiB" rss-kib))))
 
+(defun agent-board--format-age (time)
+  "Format elapsed TIME relative to now, or return `-'."
+  (if (null time)
+      "-"
+    (let ((seconds (max 0 (truncate (float-time (time-subtract (current-time)
+                                                               time))))))
+      (cond
+       ((< seconds 60)
+        (format "%ds" seconds))
+       ((< seconds 3600)
+        (format "%dm" (/ seconds 60)))
+       ((< seconds 86400)
+        (format "%dh" (/ seconds 3600)))
+       (t
+        (format "%dd" (/ seconds 86400)))))))
+
 (defun agent-board--discover-repos ()
   "Return alist of (REPO-ROOT . AI-BUFS) for all repos with agent-shell sessions.
 Also includes pinned repos added via `agent-board'.
@@ -193,6 +209,8 @@ REPO-ROOT is the canonical primary worktree path."
               (proc (agent-board--live-process
                      (agent-board-workspace-buffer ws)))
               (pid (and proc (process-id proc)))
+              (last-activity (agent-bridge-last-activity-time
+                              (agent-board-workspace-buffer ws)))
               (memory (agent-board--format-rss-kib
                        (agent-board--process-rss-kib proc snapshot))))
           (puthash path ws agent-board--workspaces)
@@ -203,6 +221,7 @@ REPO-ROOT is the canonical primary worktree path."
                  (or (agent-board-workspace-task ws) "-")
                  (agent-board-workspace-branch ws)
                  (if pid (number-to-string pid) "-")
+                 (agent-board--format-age last-activity)
                  memory
                  (abbreviate-file-name path)))))
      workspaces)))
@@ -453,12 +472,13 @@ Uses the repo of the workspace at point, or prompts for a directory."
 \\{agent-board-mode-map}"
   (setq tabulated-list-format
         [("Status"   10 t)
-          ("Project"  15 t)
-          ("Task"     40 t)
-          ("Branch"   20 t)
-          ("PID"       8 t)
-          ("Memory"   10 t)
-          ("Worktree" 34 t)])
+         ("Project"  15 t)
+         ("Task"     40 t)
+         ("Branch"   20 t)
+         ("PID"       8 t)
+         ("Last"      7 t)
+         ("Memory"   10 t)
+         ("Worktree" 27 t)])
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header)
   (let ((board-buf (current-buffer)))

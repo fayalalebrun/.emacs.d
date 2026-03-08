@@ -125,6 +125,56 @@ Each segment is an alist with `type' key.  Same format as
 (defvar-local agent-bridge--current-chunk nil
   "Cons (TYPE . TEXT) for the in-progress streaming chunk, or nil.")
 
+(defvar-local agent-bridge--last-output-time nil
+  "Time when the latest agent output notification arrived in this buffer.")
+
+(defvar-local agent-bridge--last-buffer-change-time nil
+  "Time when this buffer last changed after tracking was installed.")
+
+(defvar-local agent-bridge--last-buffer-change-tick nil
+  "Last observed `buffer-chars-modified-tick' for activity tracking.")
+
+(defvar-local agent-bridge--activity-tracking-installed nil
+  "Non-nil once agent activity tracking hooks are installed for this buffer.")
+
+(defun agent-bridge--mark-buffer-change (&rest _)
+  "Record that the current agent buffer changed just now."
+  (setq agent-bridge--last-buffer-change-time (current-time)
+        agent-bridge--last-buffer-change-tick (buffer-chars-modified-tick)))
+
+(defun agent-bridge--mark-output-time (buf)
+  "Record that BUF received agent output just now."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq agent-bridge--last-output-time (current-time)))))
+
+(defun agent-bridge--install-activity-tracking (buf)
+  "Install buffer activity tracking hooks for agent-shell BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (unless agent-bridge--activity-tracking-installed
+        (setq-local agent-bridge--last-buffer-change-tick
+                    (buffer-chars-modified-tick))
+        (add-hook 'after-change-functions #'agent-bridge--mark-buffer-change
+                  nil t)
+        (setq-local agent-bridge--activity-tracking-installed t)))))
+
+(defun agent-bridge--track-started-buffer (buf)
+  "Install activity tracking for a newly started agent-shell BUF."
+  (agent-bridge--install-activity-tracking buf)
+  buf)
+
+(advice-add 'agent-shell--start :filter-return #'agent-bridge--track-started-buffer)
+
+(defun agent-bridge-last-activity-time (buf)
+  "Return the most recent output or buffer change time for BUF, or nil."
+  (when (and buf (buffer-live-p buf))
+    (agent-bridge--install-activity-tracking buf)
+    (with-current-buffer buf
+      (let ((times (delq nil (list agent-bridge--last-output-time
+                                   agent-bridge--last-buffer-change-time))))
+        (car (last (sort times #'time-less-p)))))))
+
 (defun agent-bridge--finalize-chunk (buf)
   "Push current chunk as a segment in BUF and clear it."
   (when (buffer-live-p buf)
@@ -155,6 +205,7 @@ ARGS are the keyword arguments: :state STATE :notification NOTIFICATION."
          (buf (map-elt state :buffer)))
     (when (and (equal method "session/update")
                buf (buffer-live-p buf))
+      (agent-bridge--mark-output-time buf)
       (let* ((update (map-elt (map-elt notification 'params) 'update))
              (session-update (map-elt update 'sessionUpdate)))
         (cond
@@ -255,6 +306,9 @@ ARGS are the keyword arguments: :state STATE :notification NOTIFICATION."
                     agent-bridge--segments)))))))))
 
 (advice-add 'agent-shell--on-notification :before #'agent-bridge--capture-segments)
+
+(dolist (buf (agent-shell-buffers))
+  (agent-bridge--install-activity-tracking buf))
 
 (defun agent-bridge-segments (buf)
   "Return display segments for agent-shell BUF.
