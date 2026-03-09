@@ -134,6 +134,16 @@ Includes PROC and all of its descendants using SNAPSHOT."
        (t
         (format "%dd" (/ seconds 86400)))))))
 
+(defun agent-board--format-tokens-used (buf)
+  "Return token usage for BUF as a printable string."
+  (let ((usage (agent-bridge-usage buf)))
+    (if (not usage)
+        "-"
+      (let ((tokens (or (map-elt usage :context-used) 0)))
+        (if (numberp tokens)
+            (format "%.1fk" (/ tokens 1000.0))
+          (format "%s" tokens))))))
+
 (defun agent-board--discover-repos ()
   "Return alist of (REPO-ROOT . AI-BUFS) for all repos with agent-shell sessions.
 Also includes pinned repos added via `agent-board'.
@@ -223,6 +233,8 @@ REPO-ROOT is the canonical primary worktree path."
                  (if pid (number-to-string pid) "-")
                  (agent-board--format-age last-activity)
                  memory
+                 (agent-board--format-tokens-used
+                  (agent-board-workspace-buffer ws))
                  (abbreviate-file-name path)))))
      workspaces)))
 
@@ -478,6 +490,7 @@ Uses the repo of the workspace at point, or prompts for a directory."
          ("PID"       8 t)
          ("Last"      7 t)
          ("Memory"   10 t)
+         ("Tokens"   10 t)
          ("Worktree" 27 t)])
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header)
