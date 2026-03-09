@@ -731,6 +731,51 @@ Some packages/modes can transiently remap these during startup."
 (use-package agent-bridge
   :load-path "lisp"
   :after (agent-shell)
+  :preface
+  (defun my-agent-shell--path-key (dir)
+    "Return stable key for DIR: <basename>-<hash>."
+    (let* ((abs (directory-file-name (expand-file-name dir)))
+           (name (file-name-nondirectory abs))
+           (id (substring (md5 abs) 0 10)))
+      (format "%s-%s" name id)))
+
+  (defun my-agent-shell-transcript-file-path ()
+    "Store agent-shell transcripts under `user-emacs-directory'/var.
+Avoids creating .agent-shell folders inside project repositories."
+    (let* ((cwd (directory-file-name (expand-file-name (agent-shell-cwd))))
+           (repo-key (my-agent-shell--path-key cwd))
+           (dir (expand-file-name
+                 (format "var/agent-shell/transcripts/%s/" repo-key)
+                 user-emacs-directory))
+           (filename (format-time-string "%F-%H-%M-%S.md")))
+      (expand-file-name filename dir)))
+
+  (defun my-agent-shell-screenshots-dir ()
+    "Return centralized screenshot directory for current shell CWD."
+    (let* ((cwd (directory-file-name (expand-file-name (agent-shell-cwd))))
+           (repo-key (my-agent-shell--path-key cwd)))
+      (expand-file-name
+       (format "var/agent-shell/screenshots/%s/" repo-key)
+       user-emacs-directory)))
+
+  (defun my-agent-shell--override-destination-dir (orig-fn &rest args)
+    "Force screenshot/clipboard DESTINATION-DIR under user Emacs var."
+    (let* ((destination-dir (my-agent-shell-screenshots-dir))
+           (updated-args (copy-sequence args)))
+      (make-directory destination-dir t)
+      (setq updated-args (plist-put updated-args :destination-dir destination-dir))
+      (apply orig-fn updated-args)))
+
+  (defun my-agent-shell--around-new-worktree-shell (orig-fn &rest args)
+    "Force `agent-shell-new-worktree-shell' outside repository trees."
+    (let* ((repo-root (or (agent-shell-worktree--git-repo-root) default-directory))
+           (repo-key (my-agent-shell--path-key repo-root))
+           (agent-shell-worktree--subdirectory
+            (expand-file-name
+             (format "var/agent-shell/worktrees/%s" repo-key)
+             user-emacs-directory)))
+      (make-directory agent-shell-worktree--subdirectory t)
+      (apply orig-fn args)))
   :config
   (require 'subr-x)
   (defvar my-agent-shell-opencode-last-model-file
@@ -781,6 +826,9 @@ Some packages/modes can transiently remap these during startup."
              (advice-member-p #'my-agent-shell-opencode--sync-model-from-file-before-start
                               #'agent-shell--start)))
   (setq agent-shell-preferred-agent-config 'opencode)
+  (setq agent-shell-session-strategy 'prompt)
+  (setq agent-shell-transcript-file-path-function
+        #'my-agent-shell-transcript-file-path)
   (let ((model-id (my-agent-shell-opencode--read-last-model-id)))
     (when model-id
       (setq agent-shell-opencode-default-model-id model-id)))
@@ -801,7 +849,22 @@ Some packages/modes can transiently remap these during startup."
                            #'agent-shell--send-request)
     (advice-add 'agent-shell--send-request
                 :before #'my-agent-shell-opencode--persist-on-set-model-request))
-  (setq agent-shell-session-strategy 'prompt))
+  (with-eval-after-load 'agent-shell
+    (unless (advice-member-p #'my-agent-shell--override-destination-dir
+                             #'agent-shell--capture-screenshot)
+      (advice-add 'agent-shell--capture-screenshot :around
+                  #'my-agent-shell--override-destination-dir))
+    (unless (advice-member-p #'my-agent-shell--override-destination-dir
+                             #'agent-shell--save-clipboard-image)
+      (advice-add 'agent-shell--save-clipboard-image :around
+                  #'my-agent-shell--override-destination-dir)))
+  (with-eval-after-load 'agent-shell
+    (require 'agent-shell-worktree))
+  (with-eval-after-load 'agent-shell-worktree
+    (unless (advice-member-p #'my-agent-shell--around-new-worktree-shell
+                             #'agent-shell-new-worktree-shell)
+      (advice-add 'agent-shell-new-worktree-shell :around
+                  #'my-agent-shell--around-new-worktree-shell))))
 
 (use-package agent-board
   :load-path "lisp"
