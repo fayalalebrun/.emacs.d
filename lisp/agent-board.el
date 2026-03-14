@@ -3,6 +3,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'subr-x)
 (require 'tabulated-list)
 (require 'magit-git)
 (require 'magit-process)
@@ -22,32 +23,273 @@
 (defvar agent-board--refresh-timer nil
   "Buffer-local timer for auto-refresh.")
 
+(defvar agent-board--redraw-timer nil
+  "Timer used to debounce board redraws.")
+
+(defvar agent-board-refresh-interval 3
+  "Seconds between periodic board refreshes.")
+
+(defvar agent-board-redraw-debounce-delay 0.2
+  "Seconds to wait before redrawing all visible board buffers.")
+
+(defvar agent-board-git-cache-refresh-interval 10
+  "Seconds before async git-backed cache entries are considered stale.")
+
+(defvar agent-board-process-snapshot-refresh-interval 5
+  "Seconds before process memory snapshot is refreshed.")
+
 (defvar agent-board--pinned-repos nil
-  "Buffer-local list of canonical repo roots to always show.")
+  "Buffer-local list of repo paths to always show.")
 
 (defvar agent-board--workspaces (make-hash-table :test 'equal)
   "Buffer-local map from worktree path to workspace struct.")
 
-(defun agent-board--repo-root (&optional dir)
-  "Return the canonical repo root for DIR (or `default-directory').
-Resolves worktree paths to the primary worktree via git-common-dir.
-Returns nil if DIR does not exist or is not in a git repo."
-  (let ((default-directory (or dir default-directory)))
-    (when (file-directory-p default-directory)
-      (let ((common-dir (magit-git-string "rev-parse" "--git-common-dir")))
-        (when common-dir
-          (file-truename
-           (expand-file-name (file-name-as-directory "..") common-dir)))))))
+(defvar agent-board--repo-root-cache (make-hash-table :test 'equal)
+  "Map directory path to plist cache entry for canonical repo root.")
 
-(defun agent-board--task (toplevel branch)
-  "Return the git branch description for BRANCH in repo at TOPLEVEL."
-  (when (and branch (not (string= branch "(detached)")))
-    (let ((default-directory toplevel))
-      (magit-git-string "config" (format "branch.%s.description" branch)))))
+(defvar agent-board--repo-root-pending (make-hash-table :test 'equal)
+  "Map directory path to in-flight repo-root process.")
+
+(defvar agent-board--worktrees-cache (make-hash-table :test 'equal)
+  "Map repo path to plist cache entry for worktree data.")
+
+(defvar agent-board--worktrees-pending (make-hash-table :test 'equal)
+  "Map repo path to in-flight worktree listing process.")
+
+(defvar agent-board--task-cache (make-hash-table :test 'equal)
+  "Map (REPO . BRANCH) to plist cache entry for task description.")
+
+(defvar agent-board--task-pending (make-hash-table :test 'equal)
+  "Map (REPO . BRANCH) to in-flight task lookup process.")
+
+(defvar agent-board--process-snapshot-cache nil
+  "Cached process snapshot for memory display.")
+
+(defvar agent-board--process-snapshot-cache-at 0
+  "Timestamp for `agent-board--process-snapshot-cache'.")
+
+(defvar agent-board--process-snapshot-pending nil
+  "In-flight process object for async process snapshot refresh.")
+
+(defun agent-board--now ()
+  "Return current time as a floating-point number of seconds."
+  (float-time (current-time)))
+
+(defun agent-board--cache-fresh-p (entry interval)
+  "Return non-nil when ENTRY is fresh for INTERVAL seconds."
+  (and entry
+       (numberp interval)
+       (> interval 0)
+       (let ((at (plist-get entry :at)))
+         (and (numberp at)
+              (<= (- (agent-board--now) at) interval)))))
+
+(defun agent-board--cache-value (table key)
+  "Return cached value from TABLE for KEY."
+  (plist-get (gethash key table) :value))
+
+(defun agent-board--cache-put (table key value)
+  "Store VALUE in TABLE under KEY with the current timestamp."
+  (puthash key (list :value value :at (agent-board--now)) table)
+  value)
+
+(defun agent-board--visible-p (buffer)
+  "Return non-nil when BUFFER is visible in a window."
+  (and (buffer-live-p buffer)
+       (get-buffer-window-list buffer nil t)))
+
+(defun agent-board--schedule-redraw ()
+  "Debounce redraw for all live visible board buffers."
+  (when (timerp agent-board--redraw-timer)
+    (cancel-timer agent-board--redraw-timer))
+  (setq agent-board--redraw-timer
+        (run-with-timer
+         agent-board-redraw-debounce-delay nil
+         (lambda ()
+           (setq agent-board--redraw-timer nil)
+           (dolist (buf (buffer-list))
+             (when (and (buffer-live-p buf)
+                        (agent-board--visible-p buf))
+               (with-current-buffer buf
+                 (when (derived-mode-p 'agent-board-mode)
+                   (ignore-errors
+                     (agent-board-refresh))))))))))
+
+(defun agent-board--process-live-p (proc)
+  "Return non-nil when PROC is a live process."
+  (and proc (process-live-p proc)))
+
+(defun agent-board--start-process (name buffer directory command sentinel)
+  "Start async COMMAND in DIRECTORY using BUFFER and SENTINEL."
+  (let ((default-directory directory))
+    (make-process :name name
+                  :buffer buffer
+                  :command command
+                  :coding 'utf-8-unix
+                  :connection-type 'pipe
+                  :noquery t
+                  :sentinel sentinel
+                  :file-handler t
+                  :stderr buffer)))
+
+(defun agent-board--git-output-sentinel (proc on-success on-finish)
+  "Handle PROC completion, then call ON-SUCCESS and ON-FINISH.
+
+ON-SUCCESS receives the trimmed process output when PROC exits with code 0.
+ON-FINISH is always called.
+"
+  (when (memq (process-status proc) '(exit signal))
+    (unwind-protect
+        (when (and (eq (process-status proc) 'exit)
+                   (zerop (process-exit-status proc)))
+          (when-let* ((buf (process-buffer proc))
+                      (output (with-current-buffer buf
+                                (string-trim-right (buffer-string)))))
+            (funcall on-success output)))
+      (funcall on-finish)
+      (when-let ((buf (process-buffer proc)))
+        (kill-buffer buf)))))
+
+(defun agent-board--clear-task-cache-for-repo (repo)
+  "Clear all cached task descriptions for REPO."
+  (let ((keys (hash-table-keys agent-board--task-cache)))
+    (dolist (key keys)
+      (when (equal (car-safe key) repo)
+        (remhash key agent-board--task-cache)
+        (when-let ((proc (gethash key agent-board--task-pending)))
+          (when (process-live-p proc)
+            (delete-process proc))
+          (remhash key agent-board--task-pending))))))
+
+(defun agent-board--invalidate-worktrees-cache (repo)
+  "Invalidate cached worktree data for REPO."
+  (remhash repo agent-board--worktrees-cache)
+  (when-let ((proc (gethash repo agent-board--worktrees-pending)))
+    (when (process-live-p proc)
+      (delete-process proc))
+    (remhash repo agent-board--worktrees-pending)))
+
+(defun agent-board--repo-root-entry (dir)
+  "Return the repo-root cache entry for DIR.
+
+Starts an async refresh when needed.
+"
+  (let* ((path (and dir (file-directory-p dir) (file-truename dir)))
+         (entry (and path (gethash path agent-board--repo-root-cache))))
+    (when (and path
+               (not (agent-board--cache-fresh-p entry agent-board-git-cache-refresh-interval))
+               (not (gethash path agent-board--repo-root-pending)))
+      (let ((buf (generate-new-buffer " *agent-board-repo-root*")))
+        (puthash path
+                 (agent-board--start-process
+                  "agent-board-repo-root" buf path
+                  (list "git" "-C" path "rev-parse" "--path-format=absolute" "--git-common-dir")
+                  (lambda (proc _event)
+                    (agent-board--git-output-sentinel
+                     proc
+                     (lambda (output)
+                       (let ((root (and (not (string-empty-p output))
+                                        (ignore-errors
+                                          (file-truename
+                                           (expand-file-name ".." output))))))
+                         (agent-board--cache-put agent-board--repo-root-cache path root)
+                         (agent-board--schedule-redraw)))
+                     (lambda ()
+                       (remhash path agent-board--repo-root-pending)))))
+                 agent-board--repo-root-pending)))
+    entry))
+
+(defun agent-board--repo-key (dir)
+  "Return the best available repo grouping key for DIR."
+  (let* ((path (and dir (file-directory-p dir) (file-truename dir)))
+         (entry (and path (agent-board--repo-root-entry path))))
+    (or (and entry (plist-get entry :value)) path)))
+
+(defun agent-board--parse-worktrees-porcelain (output)
+  "Parse git worktree porcelain OUTPUT."
+  (let ((lines (split-string output "\n"))
+        (current nil)
+        (worktrees nil))
+    (dolist (line lines)
+      (cond
+       ((string-prefix-p "worktree " line)
+        (when current
+          (push current worktrees))
+        (setq current (list (substring line 9) nil nil)))
+       ((and current (string-prefix-p "HEAD " line))
+        (setf (nth 1 current) (substring line 5)))
+       ((and current (string-prefix-p "branch " line))
+        (let ((branch (substring line 7)))
+          (setf (nth 2 current)
+                (string-remove-prefix "refs/heads/" branch))))
+       ((and current (string-empty-p line))
+        (push current worktrees)
+        (setq current nil))))
+    (when current
+      (push current worktrees))
+    (nreverse worktrees)))
+
+(defun agent-board--ensure-worktrees (repo)
+  "Refresh cached worktrees for REPO asynchronously when needed."
+  (let ((entry (gethash repo agent-board--worktrees-cache)))
+    (when (and repo
+               (not (agent-board--cache-fresh-p entry agent-board-git-cache-refresh-interval))
+               (not (gethash repo agent-board--worktrees-pending)))
+      (let ((buf (generate-new-buffer " *agent-board-worktrees*")))
+        (puthash repo
+                 (agent-board--start-process
+                  "agent-board-worktrees" buf repo
+                  (list "git" "-C" repo "worktree" "list" "--porcelain")
+                  (lambda (proc _event)
+                    (agent-board--git-output-sentinel
+                     proc
+                     (lambda (output)
+                       (agent-board--cache-put
+                        agent-board--worktrees-cache repo
+                        (agent-board--parse-worktrees-porcelain output))
+                       (agent-board--schedule-redraw))
+                     (lambda ()
+                       (remhash repo agent-board--worktrees-pending)))))
+                 agent-board--worktrees-pending))))
+  (agent-board--cache-value agent-board--worktrees-cache repo))
+
+(defun agent-board--task (repo branch)
+  "Return cached task description for BRANCH in REPO, refreshing async."
+  (when (and repo branch (not (string= branch "(detached)")))
+    (let* ((key (cons repo branch))
+           (entry (gethash key agent-board--task-cache)))
+      (when (and (not (agent-board--cache-fresh-p entry agent-board-git-cache-refresh-interval))
+                 (not (gethash key agent-board--task-pending)))
+        (let ((buf (generate-new-buffer " *agent-board-task*")))
+          (puthash key
+                   (agent-board--start-process
+                    "agent-board-task" buf repo
+                    (list "git" "-C" repo "config" "--get"
+                          (format "branch.%s.description" branch))
+                    (lambda (proc _event)
+                      (when (memq (process-status proc) '(exit signal))
+                        (unwind-protect
+                            (let ((value ""))
+                              (when-let ((proc-buf (process-buffer proc)))
+                                (with-current-buffer proc-buf
+                                  (setq value (string-trim-right (buffer-string)))))
+                              (agent-board--cache-put
+                               agent-board--task-cache key value))
+                          (remhash key agent-board--task-pending)
+                          (when-let ((proc-buf (process-buffer proc)))
+                            (kill-buffer proc-buf))
+                          (agent-board--schedule-redraw)))))
+                   agent-board--task-pending)))
+      (let ((value (agent-board--cache-value agent-board--task-cache key)))
+        (unless (string-empty-p (or value ""))
+          value)))))
 
 (defun agent-board--status (ws)
   "Return status string for workspace WS."
-  (agent-bridge-status (agent-board-workspace-buffer ws)))
+  (let ((buf (agent-board-workspace-buffer ws)))
+    (if (and buf (buffer-live-p buf))
+        (or (ignore-errors (agent-bridge-status buf)) "no-agent")
+      "no-agent")))
 
 (defun agent-board--status-face (status)
   "Return face for STATUS string."
@@ -64,9 +306,7 @@ Returns nil if DIR does not exist or is not in a git repo."
   (agent-shell-buffers))
 
 (defun agent-board--live-process (buf)
-  "Return the live agent process for agent-shell BUF, or nil.
-Prefer the ACP client process when available, since the buffer process
-may just be the local transport shim."
+  "Return the live agent process for agent-shell BUF, or nil."
   (when (and buf (buffer-live-p buf))
     (with-current-buffer buf
       (let* ((client-proc (and (boundp 'agent-shell--state)
@@ -75,22 +315,51 @@ may just be the local transport shim."
              (proc (or client-proc (get-buffer-process buf))))
         (and proc (process-live-p proc) proc)))))
 
-(defun agent-board--process-snapshot ()
-  "Return a snapshot of system process attributes and child links."
+(defun agent-board--parse-process-snapshot (output)
+  "Parse `ps' OUTPUT into a snapshot plist."
   (let ((attrs (make-hash-table :test 'eql))
         (children (make-hash-table :test 'eql)))
-    (dolist (pid (list-system-processes))
-      (let ((info (ignore-errors (process-attributes pid))))
-        (when info
-          (puthash pid info attrs)
-          (let ((ppid (alist-get 'ppid info)))
-            (when (integerp ppid)
-              (puthash ppid (cons pid (gethash ppid children)) children))))))
+    (dolist (line (split-string output "\n" t))
+      (let* ((parts (split-string line "[[:space:]]+" t))
+             (pid (and (nth 0 parts) (string-to-number (nth 0 parts))))
+             (ppid (and (nth 1 parts) (string-to-number (nth 1 parts))))
+             (rss (and (nth 2 parts) (string-to-number (nth 2 parts)))))
+        (when (> pid 0)
+          (puthash pid (list (cons 'rss rss) (cons 'ppid ppid)) attrs)
+          (when (> ppid 0)
+            (puthash ppid (cons pid (gethash ppid children)) children)))))
     (list :attrs attrs :children children)))
+
+(defun agent-board--ensure-process-snapshot ()
+  "Refresh process snapshot asynchronously when it is stale."
+  (when (and (or (null agent-board--process-snapshot-cache)
+                 (> (- (agent-board--now) agent-board--process-snapshot-cache-at)
+                    agent-board-process-snapshot-refresh-interval))
+             (not (agent-board--process-live-p agent-board--process-snapshot-pending)))
+    (let ((buf (generate-new-buffer " *agent-board-ps*")))
+      (setq agent-board--process-snapshot-pending
+            (agent-board--start-process
+             "agent-board-ps" buf default-directory
+             (list "ps" "-eo" "pid=,ppid=,rss=")
+             (lambda (proc _event)
+               (when (memq (process-status proc) '(exit signal))
+                 (unwind-protect
+                     (when (and (eq (process-status proc) 'exit)
+                                (zerop (process-exit-status proc))
+                                (process-buffer proc))
+                       (with-current-buffer (process-buffer proc)
+                         (setq agent-board--process-snapshot-cache
+                               (agent-board--parse-process-snapshot (buffer-string)))
+                         (setq agent-board--process-snapshot-cache-at (agent-board--now))
+                         (agent-board--schedule-redraw)))
+                   (setq agent-board--process-snapshot-pending nil)
+                   (when-let ((proc-buf (process-buffer proc)))
+                     (kill-buffer proc-buf)))))))))
+  agent-board--process-snapshot-cache)
 
 (defun agent-board--process-subtree-rss-kib (pid snapshot &optional seen)
   "Return cumulative RSS in KiB for PID and its descendants.
-SNAPSHOT should come from `agent-board--process-snapshot'."
+SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
   (let ((seen (or seen (make-hash-table :test 'eql))))
     (if (or (null pid) (gethash pid seen))
         0
@@ -101,10 +370,9 @@ SNAPSHOT should come from `agent-board--process-snapshot'."
                     sum (agent-board--process-subtree-rss-kib child snapshot seen)))))))
 
 (defun agent-board--process-rss-kib (proc snapshot)
-  "Return PROC cumulative resident memory usage in KiB, or nil.
-Includes PROC and all of its descendants using SNAPSHOT."
+  "Return PROC cumulative resident memory usage in KiB, or nil."
   (let ((pid (and proc (process-id proc))))
-    (when pid
+    (when (and pid snapshot)
       (agent-board--process-subtree-rss-kib pid snapshot))))
 
 (defun agent-board--format-rss-kib (rss-kib)
@@ -136,68 +404,101 @@ Includes PROC and all of its descendants using SNAPSHOT."
 
 (defun agent-board--format-tokens-used (buf)
   "Return token usage for BUF as a printable string."
-  (let ((usage (agent-bridge-usage buf)))
-    (if (not usage)
-        "-"
-      (let ((tokens (or (map-elt usage :context-used) 0)))
-        (if (numberp tokens)
-            (format "%.1fk" (/ tokens 1000.0))
-          (format "%s" tokens))))))
+  (if (not (and buf (buffer-live-p buf)))
+      "-"
+    (let ((usage (ignore-errors (agent-bridge-usage buf))))
+      (if (not usage)
+          "-"
+        (let ((tokens (or (map-elt usage :context-used) 0)))
+          (if (numberp tokens)
+              (format "%.1fk" (/ tokens 1000.0))
+            (format "%s" tokens)))))))
 
 (defun agent-board--discover-repos ()
-  "Return alist of (REPO-ROOT . AI-BUFS) for all repos with agent-shell sessions.
-Also includes pinned repos added via `agent-board'.
-REPO-ROOT is the canonical primary worktree path."
-  (let ((ai-bufs (agent-board--agent-buffers))
-        (repos (make-hash-table :test 'equal)))
-    ;; Group agent-shell buffers by their canonical repo root.
-    (dolist (buf ai-bufs)
+  "Return alist of (REPO-KEY . AI-BUFS) for repos with agent sessions."
+  (let ((repos (make-hash-table :test 'equal)))
+    (dolist (buf (agent-board--agent-buffers))
       (let* ((dir (buffer-local-value 'default-directory buf))
-             (root (and dir (agent-board--repo-root dir))))
-        (when root
-          (puthash root (cons buf (gethash root repos)) repos))))
-    ;; Include pinned repos even if they have no agents.
+             (key (agent-board--repo-key dir)))
+        (when key
+          (puthash key (cons buf (gethash key repos)) repos))))
     (dolist (pinned agent-board--pinned-repos)
-      (unless (gethash pinned repos)
-        (puthash pinned nil repos)))
-    ;; Convert to alist.
+      (when-let ((key (agent-board--repo-key pinned)))
+        (unless (gethash key repos)
+          (puthash key nil repos))))
     (let (result)
-      (maphash (lambda (root bufs) (push (cons root bufs) result)) repos)
+      (maphash (lambda (key bufs) (push (cons key bufs) result)) repos)
       result)))
 
+(defun agent-board--fallback-workspaces (repo ai-bufs)
+  "Build temporary workspaces for REPO from AI-BUFS while git data loads."
+  (let ((seen (make-hash-table :test 'equal))
+        result)
+    (dolist (buf ai-bufs)
+      (let ((dir (and (buffer-live-p buf)
+                      (buffer-local-value 'default-directory buf))))
+        (when (and dir (file-directory-p dir))
+          (let ((path (file-truename dir)))
+            (unless (gethash path seen)
+              (puthash path t seen)
+              (push (make-agent-board-workspace
+                     :project (file-name-nondirectory (directory-file-name repo))
+                     :toplevel repo
+                     :branch "(loading)"
+                     :worktree path
+                     :buffer buf
+                     :primary-p (string= path repo)
+                     :task nil)
+                    result))))))
+    (unless result
+      (push (make-agent-board-workspace
+             :project (file-name-nondirectory (directory-file-name repo))
+             :toplevel repo
+             :branch "(loading)"
+             :worktree repo
+             :buffer nil
+             :primary-p t
+             :task nil)
+            result))
+    (nreverse result)))
+
 (defun agent-board--build-workspaces ()
-  "Build list of workspace structs from all repos with agent sessions."
+  "Build list of workspace structs from cached repo data."
   (let ((repos (agent-board--discover-repos))
         result)
     (dolist (repo repos)
       (let* ((toplevel (car repo))
              (ai-bufs (cdr repo))
              (project (file-name-nondirectory (directory-file-name toplevel)))
-             (worktrees (let ((default-directory toplevel))
-                          (magit-list-worktrees)))
-             (primary-path (file-truename (car (car worktrees)))))
-        (dolist (wt worktrees)
-          (let ((raw-path (car wt)))
-            (when (file-directory-p raw-path)
-              (let* ((path (file-truename raw-path))
-                     (branch (nth 2 wt))
-                     (matched-buf
-                      (cl-find-if
-                       (lambda (buf)
-                         (let ((dir (buffer-local-value 'default-directory buf)))
-                           (and dir
-                                (file-directory-p dir)
-                                (file-equal-p dir path))))
-                       ai-bufs)))
-                (push (make-agent-board-workspace
-                       :project project
-                       :toplevel toplevel
-                       :branch (or branch "(detached)")
-                       :worktree path
-                       :buffer matched-buf
-                       :primary-p (string= path primary-path)
-                       :task (agent-board--task toplevel branch))
-                      result)))))))
+             (worktrees (agent-board--ensure-worktrees toplevel))
+             (primary-path (and (consp worktrees)
+                                (file-truename (car (car worktrees))))))
+        (if (consp worktrees)
+            (dolist (wt worktrees)
+              (let ((raw-path (car wt)))
+                (when (file-directory-p raw-path)
+                  (let* ((path (file-truename raw-path))
+                         (branch (or (nth 2 wt) "(detached)"))
+                         (matched-buf
+                          (cl-find-if
+                           (lambda (buf)
+                             (let ((dir (and (buffer-live-p buf)
+                                             (buffer-local-value 'default-directory buf))))
+                               (and dir
+                                    (file-directory-p dir)
+                                    (file-equal-p dir path))))
+                           ai-bufs)))
+                    (push (make-agent-board-workspace
+                           :project project
+                           :toplevel toplevel
+                           :branch branch
+                           :worktree path
+                           :buffer matched-buf
+                           :primary-p (and primary-path (string= path primary-path))
+                           :task (agent-board--task toplevel branch))
+                          result)))))
+          (setq result (nconc (nreverse (agent-board--fallback-workspaces toplevel ai-bufs))
+                              result)))))
     (sort (nreverse result)
           (lambda (a b)
             (let ((pa (agent-board-workspace-project a))
@@ -210,34 +511,31 @@ REPO-ROOT is the canonical primary worktree path."
 (defun agent-board--entries ()
   "Return `tabulated-list-entries' for the board."
   (let ((workspaces (agent-board--build-workspaces))
-        (snapshot (agent-board--process-snapshot)))
+        (snapshot (agent-board--ensure-process-snapshot)))
     (clrhash agent-board--workspaces)
     (mapcar
      (lambda (ws)
        (let* ((status (agent-board--status ws))
               (path (agent-board-workspace-worktree ws))
-              (proc (agent-board--live-process
-                     (agent-board-workspace-buffer ws)))
+              (buf (agent-board-workspace-buffer ws))
+              (proc (agent-board--live-process buf))
               (pid (and proc (process-id proc)))
-              (last-activity (agent-bridge-last-activity-time
-                              (agent-board-workspace-buffer ws)))
+              (last-activity (and buf (ignore-errors (agent-bridge-last-activity-time buf))))
               (memory (agent-board--format-rss-kib
                        (agent-board--process-rss-kib proc snapshot))))
-          (puthash path ws agent-board--workspaces)
-          (list path
-                (vector
-                 (propertize status 'face (agent-board--status-face status))
-                 (agent-board-workspace-project ws)
-                 (or (agent-board-workspace-task ws) "-")
-                 (agent-board-workspace-branch ws)
-                 (if pid (number-to-string pid) "-")
-                 (agent-board--format-age last-activity)
-                 memory
-                 (agent-board--format-tokens-used
-                  (agent-board-workspace-buffer ws))
-                 (abbreviate-file-name path)))))
+         (puthash path ws agent-board--workspaces)
+         (list path
+               (vector
+                (propertize status 'face (agent-board--status-face status))
+                (agent-board-workspace-project ws)
+                (or (agent-board-workspace-task ws) "-")
+                (agent-board-workspace-branch ws)
+                (if pid (number-to-string pid) "-")
+                (agent-board--format-age last-activity)
+                memory
+                (agent-board--format-tokens-used buf)
+                (abbreviate-file-name path)))))
      workspaces)))
-
 
 (defun agent-board--workspace-at-point ()
   "Return the `agent-board-workspace' at point."
@@ -245,23 +543,13 @@ REPO-ROOT is the canonical primary worktree path."
     (and id (gethash id agent-board--workspaces))))
 
 (defun agent-board-refresh ()
-  "Refresh the agent board.
-Preserves window-point in every window displaying this buffer, so
-that a timer-driven refresh does not move the user's cursor."
+  "Refresh the agent board using cached data only."
   (interactive)
   (when (derived-mode-p 'agent-board-mode)
     (let ((windows (get-buffer-window-list (current-buffer) nil t)))
-      ;; Save each window's point before printing.  We must capture
-      ;; window-point (not buffer point) because when the selected
-      ;; window displays this buffer, buffer-point and window-point
-      ;; are the same object -- any goto-char in this buffer will
-      ;; move the cursor the user sees.
       (let ((saved (mapcar (lambda (w) (cons w (window-point w))) windows)))
         (setq tabulated-list-entries (agent-board--entries))
         (tabulated-list-print t t)
-        ;; Restore every window's point.  For the selected window
-        ;; this also restores buffer-point (set-window-point on
-        ;; the selected window is equivalent to goto-char).
         (dolist (wp saved)
           (when (window-live-p (car wp))
             (set-window-point (car wp) (cdr wp))))))))
@@ -286,10 +574,11 @@ that a timer-driven refresh does not move the user's cursor."
     (let ((dir (file-truename (agent-board-workspace-worktree ws)))
           (board-buf (current-buffer)))
       (agent-bridge-start dir)
-      (run-with-timer 0.5 nil (lambda ()
-                                (when (buffer-live-p board-buf)
-                                  (with-current-buffer board-buf
-                                    (agent-board-refresh))))))))
+      (run-with-timer 0.5 nil
+                      (lambda ()
+                        (when (buffer-live-p board-buf)
+                          (with-current-buffer board-buf
+                            (agent-board-refresh))))))))
 
 (defun agent-board-kill ()
   "Kill the agent in the workspace at point (keep worktree)."
@@ -315,8 +604,7 @@ that a timer-driven refresh does not move the user's cursor."
         (user-error "No running agent to interrupt")))))
 
 (defun agent-board-set-task ()
-  "Set the task description for the branch at point.
-Stored as the git branch description."
+  "Set the task description for the branch at point."
   (interactive)
   (let ((ws (agent-board--workspace-at-point)))
     (unless ws (user-error "No workspace at point"))
@@ -328,15 +616,14 @@ Stored as the git branch description."
         (user-error "Cannot set task on a detached HEAD"))
       (let ((default-directory toplevel)
             (key (format "branch.%s.description" branch)))
-      (if (string-empty-p task)
-          (magit-call-git "config" "--unset" key)
-        (magit-call-git "config" key task)))
+        (if (string-empty-p task)
+            (magit-call-git "config" "--unset" key)
+          (magit-call-git "config" key task)))
+      (agent-board--cache-put agent-board--task-cache (cons toplevel branch) task)
       (agent-board-refresh))))
 
 (defun agent-board-set-default-agent ()
-  "Set default `agent-shell' backend for future shells.
-
-This changes only future shells; existing shells are not restarted."
+  "Set default `agent-shell' backend for future shells."
   (interactive)
   (let* ((choices (cons (cons "Prompt each time (default)" nil)
                         (mapcar
@@ -351,17 +638,15 @@ This changes only future shells; existing shells are not restarted."
                              (cons (format "%s (%s)" name id) identifier)))
                          agent-shell-agent-configs)))
          (selection (completing-read "Default agent: "
-                                    (mapcar #'car choices)
-                                    nil t))
+                                     (mapcar #'car choices)
+                                     nil t))
          (value (cdr (assoc selection choices))))
     (setq agent-shell-preferred-agent-config value)
     (message "Default agent set to: %s" (or (and value (symbol-name value))
                                             "prompt each time"))))
 
 (defun agent-board-create ()
-  "Create a new worktree, then start an agent there.
-If the branch already exists, check it out; otherwise create it.
-Uses the repo of the workspace at point, or prompts for a directory."
+  "Create a new worktree, then start an agent there."
   (interactive)
   (let* ((ws (agent-board--workspace-at-point))
          (toplevel (if ws
@@ -384,6 +669,8 @@ Uses the repo of the workspace at point, or prompts for a directory."
     (when (and (not (string-empty-p task))
                (not (string= branch "(detached)")))
       (magit-call-git "config" (format "branch.%s.description" branch) task))
+    (agent-board--invalidate-worktrees-cache toplevel)
+    (agent-board--clear-task-cache-for-repo toplevel)
     (let ((dir (expand-file-name worktree-dir))
           (board-buf (current-buffer)))
       (run-with-timer 1.5 nil
@@ -411,6 +698,8 @@ Uses the repo of the workspace at point, or prompts for a directory."
       (when (and branch (magit-local-branch-p branch))
         (let ((default-directory toplevel))
           (magit-call-git "branch" "-D" branch)))
+      (agent-board--invalidate-worktrees-cache toplevel)
+      (agent-board--clear-task-cache-for-repo toplevel)
       (agent-board-refresh))))
 
 (defun agent-board-magit ()
@@ -448,7 +737,8 @@ Uses the repo of the workspace at point, or prompts for a directory."
          "  " (propertize "busy"     'face 'warning) "      Agent is working\n"
          "  " (propertize "exited"   'face 'error)   "    Process has ended\n"
          "  " (propertize "waiting"  'face 'warning) "   Permission requested\n"
-         "  " (propertize "no-agent" 'face 'shadow)  "  No agent for worktree\n"))
+         "  " (propertize "no-agent" 'face 'shadow)  "  No agent for worktree\n"
+         "\nGit and memory data refresh asynchronously from cache.\n"))
       (goto-char (point-min))
       (special-mode))
     (pop-to-buffer buf)))
@@ -478,6 +768,30 @@ Uses the repo of the workspace at point, or prompts for a directory."
 (define-key agent-board-mode-map (kbd "?") #'agent-board-help)
 (define-key agent-board-mode-map (kbd "h") #'agent-board-help)
 
+(defun agent-board--refresh-timer-callback (board-buf)
+  "Refresh BOARD-BUF if it is alive and visible."
+  (when (and (buffer-live-p board-buf)
+             (agent-board--visible-p board-buf))
+    (with-current-buffer board-buf
+      (condition-case err
+          (agent-board-refresh)
+        (error
+         (message "agent-board: refresh error: %s"
+                  (error-message-string err)))))))
+
+(defun agent-board--start-refresh-timer (&optional board-buf)
+  "Start or restart the refresh timer for BOARD-BUF."
+  (let ((board-buf (or board-buf (current-buffer))))
+    (with-current-buffer board-buf
+      (when (timerp agent-board--refresh-timer)
+        (cancel-timer agent-board--refresh-timer))
+      (setq-local agent-board--refresh-timer
+                  (run-with-timer
+                   agent-board-refresh-interval
+                   agent-board-refresh-interval
+                   (lambda ()
+                     (agent-board--refresh-timer-callback board-buf)))))))
+
 (define-derived-mode agent-board-mode tabulated-list-mode "Agent-Board"
   "Major mode for the agent board dashboard.
 
@@ -494,20 +808,11 @@ Uses the repo of the workspace at point, or prompts for a directory."
          ("Worktree" 27 t)])
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header)
-  (let ((board-buf (current-buffer)))
-    (setq-local agent-board--refresh-timer
-                (run-with-timer 2 2 (lambda ()
-                                      (when (buffer-live-p board-buf)
-                                        (with-current-buffer board-buf
-                                          (condition-case err
-                                              (agent-board-refresh)
-                                            (error
-                                             (message "agent-board: refresh error: %s"
-                                                      (error-message-string err))))))))))
+  (agent-board--start-refresh-timer (current-buffer))
   (add-hook 'kill-buffer-hook #'agent-board--cleanup nil t))
 
 (defun agent-board--cleanup ()
-  "Clean up timer when board buffer is killed."
+  "Clean up timers when the board buffer is killed."
   (when (timerp agent-board--refresh-timer)
     (cancel-timer agent-board--refresh-timer)))
 
@@ -517,14 +822,14 @@ Uses the repo of the workspace at point, or prompts for a directory."
 The repo for the current directory is pinned so it always appears,
 even if it has no agents running."
   (interactive)
-  (let ((caller-root (agent-board--repo-root))
+  (let ((caller-dir default-directory)
         (buf (get-buffer-create "*agent-board*")))
     (with-current-buffer buf
       (unless (derived-mode-p 'agent-board-mode)
         (agent-board-mode))
-      (when caller-root
-        (unless (member caller-root agent-board--pinned-repos)
-          (push caller-root agent-board--pinned-repos)))
+      (when caller-dir
+        (push (file-truename caller-dir) agent-board--pinned-repos)
+        (setq agent-board--pinned-repos (delete-dups agent-board--pinned-repos)))
       (setq tabulated-list-entries (agent-board--entries))
       (tabulated-list-print t))
     (pop-to-buffer buf)))
