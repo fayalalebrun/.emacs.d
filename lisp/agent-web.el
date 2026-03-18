@@ -12,8 +12,29 @@
   :type 'integer
   :group 'agent-bridge)
 
+(defcustom agent-web-host "127.0.0.1"
+  "Host/interface address for the agent-web HTTP server to bind to.
+Use a Tailscale IP here to expose the server only on Tailscale."
+  :type 'string
+  :group 'agent-bridge)
+
+(defcustom agent-web-use-tailscale-ip nil
+  "When non-nil, bind `agent-web' to the result of `tailscale ip -4'."
+  :type 'boolean
+  :group 'agent-bridge)
+
 (defvar agent-web--server nil
   "The running ws-server instance.")
+
+(defun agent-web--tailscale-ip ()
+  "Return the primary Tailscale IPv4 address from `tailscale ip -4'."
+  (let ((output (with-temp-buffer
+                  (unless (eq (call-process "tailscale" nil t nil "ip" "-4") 0)
+                    (error "agent-web: failed to run `tailscale ip -4'"))
+                  (string-trim (buffer-string)))))
+    (unless (string-match-p "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" output)
+      (error "agent-web: invalid Tailscale IPv4 address: %S" output))
+    output))
 
 ;;; HTML helpers
 
@@ -910,12 +931,17 @@ NAME is the form field name (default \"backend\")."
 ;;; Server lifecycle
 
 ;;;###autoload
-(defun agent-web-start (&optional port)
-  "Start the agent-web HTTP server on PORT (default `agent-web-port')."
+(defun agent-web-start (&optional port host)
+  "Start the agent-web HTTP server on PORT and HOST.
+PORT defaults to `agent-web-port'.
+HOST defaults to `agent-web-host'."
   (interactive)
   (when agent-web--server
     (user-error "Server already running; use agent-web-stop first"))
-  (let ((p (or port agent-web-port)))
+  (let ((p (or port agent-web-port))
+        (h (or host
+               (and agent-web-use-tailscale-ip (agent-web--tailscale-ip))
+               agent-web-host)))
     (setq agent-web--server
           (ws-start
            '(((:GET  . "^/sidebar\\(/[^/]+\\)?$")
@@ -943,11 +969,17 @@ NAME is the form field name (default \"backend\")."
              ((:POST . "^/create/[^/]+$")
               . agent-web--handle-create)
              ((:POST . "^/session/[^/]+/resume/.+$")
-              . agent-web--handle-resume)
-             ((:POST . "^/delete/[^/]+$")
-              . agent-web--handle-delete))
-           p))
-    (message "agent-web: listening on port %d" p)))
+               . agent-web--handle-resume)
+              ((:POST . "^/delete/[^/]+$")
+               . agent-web--handle-delete))
+             p nil :host h))
+    (message "agent-web: listening on http://%s:%d" h p)))
+
+;;;###autoload
+(defun agent-web-start-tailscale (&optional port)
+  "Start `agent-web' on PORT bound to the Tailscale IPv4 address."
+  (interactive)
+  (agent-web-start port (agent-web--tailscale-ip)))
 
 ;;;###autoload
 (defun agent-web-stop ()
