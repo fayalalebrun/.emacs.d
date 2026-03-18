@@ -65,10 +65,7 @@
  :ensure t
  :mode "\\.nix\\'")
 
-(use-package scala-ts-mode
-  :ensure t
-  :mode (("\\.scala\\'" . scala-ts-mode)
-         ("\\.sbt\\'" . scala-ts-mode)))
+
 
 (use-package websocket
   :ensure t)
@@ -503,10 +500,10 @@ Some packages/modes can transiently remap these during startup."
          ("C-c C-k" . fal-vhdl-ghdl-ae))
   )
 
-(use-package scala-mode
+(use-package scala-ts-mode
   :ensure t
   :interpreter
-  ("scala" . scala-mode))
+  ("scala" . scala-ts-mode))
 
 (use-package sbt-mode
   :ensure t
@@ -596,12 +593,13 @@ Some packages/modes can transiently remap these during startup."
 
 (use-package lsp-metals
   :ensure t
+  :commands lsp-metals
   :custom
   ;; You might set metals server options via -J arguments. This might not always work, for instance when
   ;; metals is installed using nix. In this case you can use JAVA_TOOL_OPTIONS environment variable.
   (lsp-metals-server-args '(;; Metals claims to support range formatting by default but it supports range
                             ;; formatting of multiline strings only. You might want to disable it so that
-                            ;; emacs can use indentation provided by scala-mode.
+                            ;; emacs can use indentation provided by scala-ts-mode.
                             "-J-Dmetals.allow-multiline-string-formatting=off"
                             ;; Enable unicode icons. But be warned that emacs might not render unicode
                             ;; correctly in all cases.
@@ -611,7 +609,7 @@ Some packages/modes can transiently remap these during startup."
   ;; setting `lsp-semantic-tokens-apply-modifiers' to `nil' because metals sends `abstract' modifier
   ;; which is mapped to `keyword' face.
   (lsp-metals-enable-semantic-highlighting t)
-  :hook (scala-mode . lsp))
+  :hook (scala-ts-mode . lsp-deferred))
 
 (use-package org-roam
   :init
@@ -725,8 +723,7 @@ Some packages/modes can transiently remap these during startup."
   :quelpa (agent-shell
            :fetcher github
            :repo "tempdragon/agent-shell"
-           :branch "fix-multi-req"
-           :commit "5192940712db7cae1cd51ccae6356fb15616e9b7"))
+           :branch "main"))
 
 (use-package agent-bridge
   :load-path "lisp"
