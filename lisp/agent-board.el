@@ -14,11 +14,18 @@
 (declare-function magit-worktree-checkout "magit-worktree")
 (declare-function magit-worktree-delete "magit-worktree")
 
-(require 'agent-bridge)
+(require 'map)
+(require 'opencode)
+(require 'opencode-common)
+(require 'opencode-sessions)
 
 (cl-defstruct agent-board-workspace
   "A worktree with optional agent session buffer."
   project toplevel branch worktree buffer primary-p task)
+
+(defgroup agent-board nil
+  "Workspace dashboard for OpenCode worktrees."
+  :group 'tools)
 
 (defvar agent-board--refresh-timer nil
   "Buffer-local timer for auto-refresh.")
@@ -37,6 +44,12 @@
 
 (defvar agent-board-process-snapshot-refresh-interval 5
   "Seconds before process memory snapshot is refreshed.")
+
+(defvar agent-board-session-cache-refresh-interval 10
+  "Seconds before OpenCode session cache entries are considered stale.")
+
+(defvar agent-board-status-cache-refresh-interval 3
+  "Seconds before OpenCode status cache entries are considered stale.")
 
 (defvar agent-board--pinned-repos nil
   "Buffer-local list of repo paths to always show.")
@@ -62,6 +75,18 @@
 (defvar agent-board--task-pending (make-hash-table :test 'equal)
   "Map (REPO . BRANCH) to in-flight task lookup process.")
 
+(defvar agent-board--session-cache (make-hash-table :test 'equal)
+  "Map worktree path to plist cache entry for OpenCode sessions.")
+
+(defvar agent-board--session-pending (make-hash-table :test 'equal)
+  "Map worktree path to in-flight OpenCode session refresh state.")
+
+(defvar agent-board--status-cache (make-hash-table :test 'equal)
+  "Map worktree path to plist cache entry for OpenCode session statuses.")
+
+(defvar agent-board--status-pending (make-hash-table :test 'equal)
+  "Map worktree path to in-flight OpenCode status refresh state.")
+
 (defvar agent-board--process-snapshot-cache nil
   "Cached process snapshot for memory display.")
 
@@ -70,6 +95,16 @@
 
 (defvar agent-board--process-snapshot-pending nil
   "In-flight process object for async process snapshot refresh.")
+
+(defcustom agent-board-opencode-default-agent-name nil
+  "Default OpenCode agent name to use for new sessions.
+When nil, new sessions keep OpenCode's default primary agent."
+  :type '(choice (const :tag "OpenCode default" nil)
+                 string)
+  :group 'agent-board)
+
+(defvar-local agent-board--last-activity-time nil
+  "Most recent activity time observed for this OpenCode session buffer.")
 
 (defun agent-board--now ()
   "Return current time as a floating-point number of seconds."
@@ -286,10 +321,21 @@ Starts an async refresh when needed.
 
 (defun agent-board--status (ws)
   "Return status string for workspace WS."
-  (let ((buf (agent-board-workspace-buffer ws)))
-    (if (and buf (buffer-live-p buf))
-        (or (ignore-errors (agent-bridge-status buf)) "no-agent")
-      "no-agent")))
+  (let ((buf (agent-board-workspace-buffer ws))
+        (server-status (agent-board--workspace-status-from-server
+                        (agent-board-workspace-worktree ws)))
+        (sessions (agent-board--workspace-sessions
+                   (agent-board-workspace-worktree ws))))
+    (cond
+     ((and buf (buffer-live-p buf))
+      (with-current-buffer buf
+        (or (and (boundp 'opencode-session-status)
+                 opencode-session-status)
+              server-status
+              "no-agent")))
+     (server-status server-status)
+     (sessions "idle")
+     (t "no-agent"))))
 
 (defun agent-board--status-face (status)
   "Return face for STATUS string."
@@ -302,18 +348,16 @@ Starts an async refresh when needed.
     (_          'shadow)))
 
 (defun agent-board--agent-buffers ()
-  "Return all live agent-shell session buffers."
-  (agent-shell-buffers))
+  "Return all live OpenCode session buffers."
+  (seq-filter #'buffer-live-p (hash-table-values opencode-session-buffers)))
 
 (defun agent-board--live-process (buf)
-  "Return the live agent process for agent-shell BUF, or nil."
+  "Return the live process for OpenCode BUF, or nil.
+Ignore dummy comint processes that do not have a real PID."
   (when (and buf (buffer-live-p buf))
     (with-current-buffer buf
-      (let* ((client-proc (and (boundp 'agent-shell--state)
-                               (map-elt (map-elt agent-shell--state :client)
-                                        :process)))
-             (proc (or client-proc (get-buffer-process buf))))
-        (and proc (process-live-p proc) proc)))))
+      (let ((proc (get-buffer-process buf)))
+        (and proc (process-live-p proc) (process-id proc) proc)))))
 
 (defun agent-board--parse-process-snapshot (output)
   "Parse `ps' OUTPUT into a snapshot plist."
@@ -406,13 +450,177 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
   "Return token usage for BUF as a printable string."
   (if (not (and buf (buffer-live-p buf)))
       "-"
-    (let ((usage (ignore-errors (agent-bridge-usage buf))))
-      (if (not usage)
-          "-"
-        (let ((tokens (or (map-elt usage :context-used) 0)))
-          (if (numberp tokens)
-              (format "%.1fk" (/ tokens 1000.0))
-            (format "%s" tokens)))))))
+    (with-current-buffer buf
+      (let ((tokens (and (boundp 'opencode-session-tokens)
+                         opencode-session-tokens)))
+        (if (numberp tokens)
+            (format "%.1fk" (/ tokens 1000.0))
+          "-")))))
+
+(defun agent-board--find-buffer-for-worktree (dir)
+  "Return the live OpenCode session buffer for DIR, or nil."
+  (let ((target (file-truename (expand-file-name dir))))
+    (cl-find-if
+     (lambda (buf)
+       (and (buffer-live-p buf)
+            (let ((buf-dir (buffer-local-value 'default-directory buf)))
+              (and buf-dir
+                   (file-directory-p buf-dir)
+                   (file-equal-p (file-truename buf-dir) target)))))
+     (agent-board--agent-buffers))))
+
+(defun agent-board--directory-sessions (dir on-success)
+  "Call ON-SUCCESS with top-level OpenCode sessions for DIR."
+  (let ((target (file-name-as-directory (expand-file-name dir))))
+    (let ((default-directory target))
+      (opencode-autoconnect
+       (lambda ()
+         (let ((default-directory target))
+           (opencode-api-sessions sessions
+             (funcall
+              on-success
+              (seq-filter
+               (lambda (session)
+                 (and (not (alist-get 'parentID session))
+                      (let ((session-dir (alist-get 'directory session)))
+                        (and session-dir
+                             (file-directory-p session-dir)
+                             (file-equal-p (file-name-as-directory
+                                            (file-truename session-dir))
+                                           (file-name-as-directory
+                                            (file-truename target)))))))
+               sessions)))))))))
+
+(defun agent-board--directory-session-statuses (dir on-success)
+  "Call ON-SUCCESS with OpenCode session statuses for DIR."
+  (let ((target (file-name-as-directory (expand-file-name dir))))
+    (let ((default-directory target))
+      (opencode-autoconnect
+       (lambda ()
+         (let ((default-directory target))
+           (opencode-api-sessions-status statuses
+             (funcall on-success statuses))))))))
+
+(defun agent-board--session-updated-seconds (session)
+  "Return SESSION updated timestamp as seconds since epoch." 
+  (/ (float (or (map-nested-elt session '(time updated)) 0)) 1000.0))
+
+(defun agent-board--ensure-worktree-sessions (dir)
+  "Refresh cached OpenCode sessions for DIR asynchronously when needed."
+  (let* ((key (file-name-as-directory (file-truename dir)))
+         (entry (gethash key agent-board--session-cache)))
+    (when (and (not (agent-board--cache-fresh-p entry
+                                                agent-board-session-cache-refresh-interval))
+               (not (gethash key agent-board--session-pending)))
+      (puthash key t agent-board--session-pending)
+      (agent-board--directory-sessions
+       key
+       (lambda (sessions)
+         (agent-board--cache-put
+          agent-board--session-cache key
+          (sort (copy-sequence sessions)
+                (lambda (a b)
+                  (> (agent-board--session-updated-seconds a)
+                     (agent-board--session-updated-seconds b)))))
+         (remhash key agent-board--session-pending)
+         (agent-board--schedule-redraw))))
+    (agent-board--cache-value agent-board--session-cache key)))
+
+(defun agent-board--workspace-sessions (worktree)
+  "Return cached OpenCode sessions for WORKTREE, refreshing async if needed."
+  (and worktree
+       (file-directory-p worktree)
+       (agent-board--ensure-worktree-sessions worktree)))
+
+(defun agent-board--ensure-worktree-statuses (dir)
+  "Refresh cached OpenCode statuses for DIR asynchronously when needed."
+  (let* ((key (file-name-as-directory (file-truename dir)))
+         (entry (gethash key agent-board--status-cache)))
+    (when (and (not (agent-board--cache-fresh-p entry
+                                                agent-board-status-cache-refresh-interval))
+               (not (gethash key agent-board--status-pending)))
+      (puthash key t agent-board--status-pending)
+      (agent-board--directory-session-statuses
+       key
+       (lambda (statuses)
+         (agent-board--cache-put agent-board--status-cache key statuses)
+         (remhash key agent-board--status-pending)
+         (agent-board--schedule-redraw))))
+    (agent-board--cache-value agent-board--status-cache key)))
+
+(defun agent-board--workspace-status-map (worktree)
+  "Return cached OpenCode status map for WORKTREE, refreshing async if needed."
+  (and worktree
+       (file-directory-p worktree)
+       (agent-board--ensure-worktree-statuses worktree)))
+
+(defun agent-board--workspace-status-from-server (worktree)
+  "Return the current server status for WORKTREE, or nil."
+  (let ((statuses (agent-board--workspace-status-map worktree)))
+    (when statuses
+      (let* ((first (car statuses))
+             (value (cdr first)))
+        (and value (alist-get 'type value))))))
+
+(defun agent-board--apply-default-agent (buf)
+  "Apply `agent-board-opencode-default-agent-name' to OpenCode BUF."
+  (when (and agent-board-opencode-default-agent-name
+             (buffer-live-p buf))
+    (with-current-buffer buf
+      (when (derived-mode-p 'opencode-session-mode)
+        (when-let ((agent (seq-find (lambda (item)
+                                      (and (string= (alist-get 'name item)
+                                                    agent-board-opencode-default-agent-name)
+                                           (string= (alist-get 'mode item) "primary")))
+                                    opencode-session-agents)))
+          (setq opencode-session-agent agent)
+          (force-mode-line-update))))))
+
+(defun agent-board--start-opencode-session (dir &optional title)
+  "Start a new OpenCode session in DIR, optionally with TITLE."
+  (let ((target (file-name-as-directory (expand-file-name dir))))
+    (let ((default-directory target))
+      (opencode-autoconnect
+       (lambda ()
+         (let ((default-directory target))
+           (opencode-api-create-session (if title
+                                            `((title . ,title))
+                                          (make-hash-table))
+               session
+             (opencode-open-session session)
+             (agent-board--apply-default-agent
+              (gethash (alist-get 'id session) opencode-session-buffers)))))))))
+
+(defun agent-board--open-workspace (dir)
+  "Open the most recent OpenCode session for DIR or the project view."
+  (if-let ((buffer (agent-board--find-buffer-for-worktree dir)))
+      (pop-to-buffer buffer)
+    (agent-board--directory-sessions
+     dir
+     (lambda (sessions)
+       (if sessions
+           (opencode-open-session
+            (car (sort (copy-sequence sessions)
+                       (lambda (a b)
+                         (> (or (map-nested-elt a '(time updated)) 0)
+                            (or (map-nested-elt b '(time updated)) 0))))))
+         (opencode-open-project dir))))))
+
+(defun agent-board--mark-session-activity (&optional buffer)
+  "Record activity time for OpenCode BUFFER or the current buffer."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq agent-board--last-activity-time (current-time))))))
+
+(defun agent-board--after-opencode-message-updated (info)
+  "Track OpenCode activity after message update INFO."
+  (when-let ((buffer (gethash (alist-get 'sessionID info) opencode-session-buffers)))
+    (agent-board--mark-session-activity buffer)))
+
+(defun agent-board--after-opencode-update-part (&rest _)
+  "Track OpenCode activity in the current session buffer."
+  (agent-board--mark-session-activity (current-buffer)))
 
 (defun agent-board--discover-repos ()
   "Return alist of (REPO-KEY . AI-BUFS) for repos with agent sessions."
@@ -514,27 +722,35 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
         (snapshot (agent-board--ensure-process-snapshot)))
     (clrhash agent-board--workspaces)
     (mapcar
-     (lambda (ws)
-       (let* ((status (agent-board--status ws))
-              (path (agent-board-workspace-worktree ws))
-              (buf (agent-board-workspace-buffer ws))
-              (proc (agent-board--live-process buf))
-              (pid (and proc (process-id proc)))
-              (last-activity (and buf (ignore-errors (agent-bridge-last-activity-time buf))))
-              (memory (agent-board--format-rss-kib
-                       (agent-board--process-rss-kib proc snapshot))))
+      (lambda (ws)
+        (let* ((status (agent-board--status ws))
+               (path (agent-board-workspace-worktree ws))
+               (buf (agent-board-workspace-buffer ws))
+               (sessions (agent-board--workspace-sessions path))
+               (proc (agent-board--live-process buf))
+               (pid (and proc (process-id proc)))
+               (last-activity (and buf
+                                   (buffer-live-p buf)
+                                   (buffer-local-value 'agent-board--last-activity-time buf)))
+               (last-session-time (and (not last-activity)
+                                       sessions
+                                       (seconds-to-time
+                                        (agent-board--session-updated-seconds
+                                         (car sessions)))))
+               (memory (agent-board--format-rss-kib
+                        (agent-board--process-rss-kib proc snapshot))))
          (puthash path ws agent-board--workspaces)
          (list path
                (vector
                 (propertize status 'face (agent-board--status-face status))
-                (agent-board-workspace-project ws)
-                (or (agent-board-workspace-task ws) "-")
-                (agent-board-workspace-branch ws)
-                (if pid (number-to-string pid) "-")
-                (agent-board--format-age last-activity)
-                memory
-                (agent-board--format-tokens-used buf)
-                (abbreviate-file-name path)))))
+                 (agent-board-workspace-project ws)
+                 (or (agent-board-workspace-task ws) "-")
+                 (agent-board-workspace-branch ws)
+                 (if pid (number-to-string pid) "-")
+                 (agent-board--format-age (or last-activity last-session-time))
+                 memory
+                 (agent-board--format-tokens-used buf)
+                 (abbreviate-file-name path)))))
      workspaces)))
 
 (defun agent-board--workspace-at-point ()
@@ -559,21 +775,16 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
   (interactive)
   (let ((ws (agent-board--workspace-at-point)))
     (unless ws (user-error "No workspace at point"))
-    (let ((buf (agent-board-workspace-buffer ws)))
-      (cond
-       ((and buf (buffer-live-p buf))
-        (pop-to-buffer buf))
-       (t
-        (user-error "No agent buffer for this workspace"))))))
+    (agent-board--open-workspace (agent-board-workspace-worktree ws))))
 
 (defun agent-board-restart ()
-  "Start (or restart) an agent in the workspace at point."
+  "Start a fresh OpenCode session in the workspace at point."
   (interactive)
   (let ((ws (agent-board--workspace-at-point)))
     (unless ws (user-error "No workspace at point"))
     (let ((dir (file-truename (agent-board-workspace-worktree ws)))
           (board-buf (current-buffer)))
-      (agent-bridge-start dir)
+      (agent-board--start-opencode-session dir)
       (run-with-timer 0.5 nil
                       (lambda ()
                         (when (buffer-live-p board-buf)
@@ -594,13 +805,15 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
         (user-error "No agent to kill"))))))
 
 (defun agent-board-interrupt ()
-  "Interrupt the running agent in the workspace at point."
+  "Abort the running OpenCode request in the workspace at point."
   (interactive)
   (let ((ws (agent-board--workspace-at-point)))
     (unless ws (user-error "No workspace at point"))
     (let ((buf (agent-board-workspace-buffer ws)))
       (if (and buf (buffer-live-p buf))
-          (progn (agent-bridge-interrupt buf) (agent-board-refresh))
+          (with-current-buffer buf
+            (opencode-abort-session)
+            (agent-board-refresh))
         (user-error "No running agent to interrupt")))))
 
 (defun agent-board-set-task ()
@@ -623,27 +836,26 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
       (agent-board-refresh))))
 
 (defun agent-board-set-default-agent ()
-  "Set default `agent-shell' backend for future shells."
+  "Set the default OpenCode primary agent for future sessions."
   (interactive)
-  (let* ((choices (cons (cons "Prompt each time (default)" nil)
-                        (mapcar
-                         (lambda (config)
-                           (let* ((identifier (map-elt config :identifier))
-                                  (buffer-name (map-elt config :buffer-name))
-                                  (mode-line-name (map-elt config :mode-line-name))
-                                  (name (or mode-line-name buffer-name "Unknown agent"))
-                                  (id (if identifier
-                                          (symbol-name identifier)
-                                        "custom")))
-                             (cons (format "%s (%s)" name id) identifier)))
-                         agent-shell-agent-configs)))
-         (selection (completing-read "Default agent: "
-                                     (mapcar #'car choices)
-                                     nil t))
-         (value (cdr (assoc selection choices))))
-    (setq agent-shell-preferred-agent-config value)
-    (message "Default agent set to: %s" (or (and value (symbol-name value))
-                                            "prompt each time"))))
+  (opencode-autoconnect
+   (lambda ()
+     (let* ((choices (cons "OpenCode default"
+                           (mapcar (lambda (agent)
+                                     (alist-get 'name agent))
+                                   (seq-filter (lambda (agent)
+                                                 (string= (alist-get 'mode agent) "primary"))
+                                               opencode-agents))))
+            (selection (completing-read "Default OpenCode agent: "
+                                        choices nil t nil nil
+                                        (or agent-board-opencode-default-agent-name
+                                            "OpenCode default"))))
+       (setq agent-board-opencode-default-agent-name
+             (unless (string= selection "OpenCode default")
+               selection))
+       (message "Default OpenCode agent set to: %s"
+                (or agent-board-opencode-default-agent-name
+                    "OpenCode default"))))))
 
 (defun agent-board-create ()
   "Create a new worktree, then start an agent there."
@@ -675,7 +887,7 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
           (board-buf (current-buffer)))
       (run-with-timer 1.5 nil
                       (lambda ()
-                        (agent-bridge-start dir)
+                        (agent-board--start-opencode-session dir task)
                         (when (buffer-live-p board-buf)
                           (with-current-buffer board-buf
                             (agent-board-refresh))))))))
@@ -718,26 +930,24 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
         (erase-buffer)
         (insert
          (propertize "Agent Board" 'face 'bold)
-         " - Global Workspace + Agent Dashboard\n\n"
+         " - Global Workspace + OpenCode Dashboard\n\n"
          (propertize "Keybindings" 'face 'bold) "\n"
-         "  RET      Jump to agent buffer at point\n"
+         "  RET      Open the latest OpenCode session at point\n"
          "  g        Refresh\n"
-         "  a        Set default agent for future shells\n"
+         "  a        Set default OpenCode agent for new sessions\n"
          "  t        Set task (git branch description)\n"
-         "  k        Kill agent (keep worktree)\n"
-         "  c        Create workspace (new worktree + agent)\n"
-         "  r        Restart agent in workspace\n"
-         "  d        Delete workspace (kill agent + remove worktree)\n"
-         "  C-c C-c  Interrupt running agent\n"
+         "  k        Kill session buffer (keep worktree)\n"
+         "  c        Create workspace (new worktree + OpenCode session)\n"
+         "  r        Start a fresh OpenCode session in workspace\n"
+         "  d        Delete workspace (kill buffer + remove worktree)\n"
+         "  C-c C-c  Abort running OpenCode request\n"
          "  G        Open magit-status for worktree\n"
          "  h/?      This help\n"
          "  q        Quit\n\n"
          (propertize "Status" 'face 'bold) "\n"
          "  " (propertize "idle"     'face 'success) "      Waiting for input\n"
-         "  " (propertize "busy"     'face 'warning) "      Agent is working\n"
-         "  " (propertize "exited"   'face 'error)   "    Process has ended\n"
-         "  " (propertize "waiting"  'face 'warning) "   Permission requested\n"
-         "  " (propertize "no-agent" 'face 'shadow)  "  No agent for worktree\n"
+         "  " (propertize "busy"     'face 'warning) "      OpenCode is working\n"
+         "  " (propertize "no-agent" 'face 'shadow)  "  No open session buffer for worktree\n"
          "\nGit and memory data refresh asynchronously from cache.\n"))
       (goto-char (point-min))
       (special-mode))
@@ -767,6 +977,18 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
 (define-key agent-board-mode-map (kbd "q") #'quit-window)
 (define-key agent-board-mode-map (kbd "?") #'agent-board-help)
 (define-key agent-board-mode-map (kbd "h") #'agent-board-help)
+
+(add-hook 'opencode-session-mode-hook #'agent-board--mark-session-activity)
+
+(with-eval-after-load 'opencode-sessions
+  (unless (advice-member-p #'agent-board--after-opencode-message-updated
+                           #'opencode-session--message-updated)
+    (advice-add 'opencode-session--message-updated :after
+                #'agent-board--after-opencode-message-updated))
+  (unless (advice-member-p #'agent-board--after-opencode-update-part
+                           #'opencode-session--update-part)
+    (advice-add 'opencode-session--update-part :after
+                #'agent-board--after-opencode-update-part)))
 
 (defun agent-board--refresh-timer-callback (board-buf)
   "Refresh BOARD-BUF if it is alive and visible."

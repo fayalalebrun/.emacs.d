@@ -719,159 +719,32 @@ Some packages/modes can transiently remap these during startup."
 (use-package web-server
   :ensure t)
 
-(use-package agent-shell
-  :quelpa (agent-shell
-           :fetcher github
-           :repo "tempdragon/agent-shell"
-           :branch "main"))
-
-(use-package agent-bridge
-  :load-path "lisp"
-  :after (agent-shell)
-  :preface
-  (defun my-agent-shell--path-key (dir)
-    "Return stable key for DIR: <basename>-<hash>."
-    (let* ((abs (directory-file-name (expand-file-name dir)))
-           (name (file-name-nondirectory abs))
-           (id (substring (md5 abs) 0 10)))
-      (format "%s-%s" name id)))
-
-  (defun my-agent-shell-transcript-file-path ()
-    "Store agent-shell transcripts under `user-emacs-directory'/var.
-Avoids creating .agent-shell folders inside project repositories."
-    (let* ((cwd (directory-file-name (expand-file-name (agent-shell-cwd))))
-           (repo-key (my-agent-shell--path-key cwd))
-           (dir (expand-file-name
-                 (format "var/agent-shell/transcripts/%s/" repo-key)
-                 user-emacs-directory))
-           (filename (format-time-string "%F-%H-%M-%S.md")))
-      (expand-file-name filename dir)))
-
-  (defun my-agent-shell-screenshots-dir ()
-    "Return centralized screenshot directory for current shell CWD."
-    (let* ((cwd (directory-file-name (expand-file-name (agent-shell-cwd))))
-           (repo-key (my-agent-shell--path-key cwd)))
-      (expand-file-name
-       (format "var/agent-shell/screenshots/%s/" repo-key)
-       user-emacs-directory)))
-
-  (defun my-agent-shell--override-destination-dir (orig-fn &rest args)
-    "Force screenshot/clipboard DESTINATION-DIR under user Emacs var."
-    (let* ((destination-dir (my-agent-shell-screenshots-dir))
-           (updated-args (copy-sequence args)))
-      (make-directory destination-dir t)
-      (setq updated-args (plist-put updated-args :destination-dir destination-dir))
-      (apply orig-fn updated-args)))
-
-  (defun my-agent-shell--around-new-worktree-shell (orig-fn &rest args)
-    "Force `agent-shell-new-worktree-shell' outside repository trees."
-    (let* ((repo-root (or (agent-shell-worktree--git-repo-root) default-directory))
-           (repo-key (my-agent-shell--path-key repo-root))
-           (agent-shell-worktree--subdirectory
-            (expand-file-name
-             (format "var/agent-shell/worktrees/%s" repo-key)
-             user-emacs-directory)))
-      (make-directory agent-shell-worktree--subdirectory t)
-      (apply orig-fn args)))
+(use-package opencode
+  :vc (:url "https://codeberg.org/sczi/opencode.el.git" :rev :newest)
+  :commands (opencode
+             opencode-connect
+             opencode-disconnect
+             opencode-select-project
+             opencode-select-open-session
+             opencode-new-worktree
+             opencode-new-session
+             opencode-select-idle
+             opencode-visit-last-idle
+             opencode-add-file-dwim
+             opencode-add-region
+             opencode-add-buffer-dwim)
+  :bind (("C-c o" . opencode))
   :config
-  (require 'subr-x)
-  (defvar my-agent-shell-opencode-last-model-file
-    (expand-file-name ".agent-shell/opencode-last-model-id" user-emacs-directory)
-    "State file storing the most recent OpenCode model id used in agent-shell.")
-  (defun my-agent-shell-opencode--read-last-model-id ()
-    "Return persisted OpenCode model id, or nil if unavailable."
-    (when (file-readable-p my-agent-shell-opencode-last-model-file)
-      (let ((value (with-temp-buffer
-                     (insert-file-contents my-agent-shell-opencode-last-model-file)
-                     (string-trim (buffer-string)))))
-        (unless (string-empty-p value) value))))
-  (defun my-agent-shell-opencode--write-last-model-id (model-id)
-    "Persist MODEL-ID for future new OpenCode sessions."
-    (make-directory (file-name-directory my-agent-shell-opencode-last-model-file) t)
-    (with-temp-file my-agent-shell-opencode-last-model-file
-      (insert model-id "\n")))
-  (defun my-agent-shell-opencode--persist-on-set-model-request (&rest args)
-    "Persist model id when OpenCode sends a session/set_model request."
-    (let* ((state (plist-get args :state))
-           (request (plist-get args :request))
-           (method (and request (map-elt request :method)))
-           (identifier (and state (map-nested-elt state '(:agent-config :identifier))))
-           (model-id (and request (map-nested-elt request '(:params modelId)))))
-      (when (and (eq identifier 'opencode)
-                 (string= method "session/set_model")
-                 (stringp model-id)
-                 (> (length model-id) 0))
-        (setq agent-shell-opencode-default-model-id model-id)
-        (my-agent-shell-opencode--write-last-model-id model-id))))
-  (defun my-agent-shell-opencode--sync-model-from-file-before-start (&rest _)
-    "Refresh OpenCode default model from disk before starting a shell."
-    (let ((model-id (my-agent-shell-opencode--read-last-model-id)))
-      (when model-id
-        (setq agent-shell-opencode-default-model-id model-id))))
-  (defun my-agent-shell-opencode-debug-state ()
-    "Show OpenCode model persistence state in the minibuffer."
-    (interactive)
-    (message "agent=%S default=%S session=%S file=%S set-model-advice=%S start-advice=%S"
-             (when (boundp 'agent-shell--state)
-               (map-nested-elt agent-shell--state '(:agent-config :identifier)))
-             (bound-and-true-p agent-shell-opencode-default-model-id)
-             (when (boundp 'agent-shell--state)
-               (map-nested-elt agent-shell--state '(:session :model-id)))
-             (my-agent-shell-opencode--read-last-model-id)
-             (advice-member-p #'my-agent-shell-opencode--persist-on-set-model-request
-                              #'agent-shell--send-request)
-             (advice-member-p #'my-agent-shell-opencode--sync-model-from-file-before-start
-                              #'agent-shell--start)))
-  (setq agent-shell-preferred-agent-config 'opencode)
-  (setq agent-shell-session-strategy 'prompt)
-  (setq agent-shell-transcript-file-path-function
-        #'my-agent-shell-transcript-file-path)
-  (let ((model-id (my-agent-shell-opencode--read-last-model-id)))
-    (when model-id
-      (setq agent-shell-opencode-default-model-id model-id)))
-  ;; Remove old intrusive advice wrappers, then keep a lightweight observer.
-  (advice-remove 'agent-shell--set-session-from-response
-                 #'my-agent-shell-opencode--after-session-from-response)
-  (advice-remove 'agent-shell-set-session-model
-                 #'my-agent-shell-opencode--around-set-session-model)
-  (advice-remove 'agent-shell--set-default-model
-                 #'my-agent-shell-opencode--around-set-default-model)
-  (advice-remove 'agent-shell--update-header-and-mode-line
-                 #'my-agent-shell-opencode--remember-model)
-  (unless (advice-member-p #'my-agent-shell-opencode--sync-model-from-file-before-start
-                           #'agent-shell--start)
-    (advice-add 'agent-shell--start
-                :before #'my-agent-shell-opencode--sync-model-from-file-before-start))
-  (unless (advice-member-p #'my-agent-shell-opencode--persist-on-set-model-request
-                           #'agent-shell--send-request)
-    (advice-add 'agent-shell--send-request
-                :before #'my-agent-shell-opencode--persist-on-set-model-request))
-  (with-eval-after-load 'agent-shell
-    (unless (advice-member-p #'my-agent-shell--override-destination-dir
-                             #'agent-shell--capture-screenshot)
-      (advice-add 'agent-shell--capture-screenshot :around
-                  #'my-agent-shell--override-destination-dir))
-    (unless (advice-member-p #'my-agent-shell--override-destination-dir
-                             #'agent-shell--save-clipboard-image)
-      (advice-add 'agent-shell--save-clipboard-image :around
-                  #'my-agent-shell--override-destination-dir)))
-  (with-eval-after-load 'agent-shell
-    (require 'agent-shell-worktree))
-  (with-eval-after-load 'agent-shell-worktree
-    (unless (advice-member-p #'my-agent-shell--around-new-worktree-shell
-                             #'agent-shell-new-worktree-shell)
-      (advice-add 'agent-shell-new-worktree-shell :around
-                  #'my-agent-shell--around-new-worktree-shell))))
+  (setq opencode-port 4097)
+  (setq opencode-worktree-directory
+        (expand-file-name "var/opencode/worktrees/" user-emacs-directory))
+  (make-directory opencode-worktree-directory t))
 
 (use-package agent-board
   :load-path "lisp"
+  :after opencode
   :commands (agent-board)
   :bind (("C-c w" . agent-board)))
-
-(use-package agent-web
-  :load-path "lisp"
-  :after (agent-board agent-bridge web-server)
-  :commands (agent-web-start agent-web-stop))
 
 (use-package ai-code
   :quelpa (ai-code :fetcher github :repo "tninja/ai-code-interface.el")
@@ -1085,11 +958,13 @@ Avoids creating .agent-shell folders inside project repositories."
 	deadgrep eat ement emms envrc exec-path-from-shell eyebrowse
 	flycheck glsl-mode haskell-mode helm-lsp helm-projectile
 	helm-tramp lsp-metals lsp-pyright lsp-ui lua-mode neotree
-	nix-ts-mode no-littering org-download org-roam pdf-tools
-	pgmacs platformio-mode prettier prodigy quelpa-use-package
-	rust-mode sbt-mode scala-ts-mode separedit shell-command-x
-	toml-mode typst-preview typst-ts-mode web-server xelb
-	yasnippet))
+	nix-ts-mode no-littering opencode org-download org-roam
+	pdf-tools pgmacs platformio-mode prettier
+	prodigy quelpa-use-package rust-mode sbt-mode scala-ts-mode
+	separedit shell-command-x toml-mode typst-preview
+	typst-ts-mode web-server xelb yasnippet))
+ '(package-vc-selected-packages
+   '((opencode :url "https://codeberg.org/sczi/opencode.el.git")))
  '(pdf-tools-handle-upgrades nil)
  '(safe-local-variable-directories
    '("/home/fal/Sync/rtlking/" "/home/fal/Default Folder/rtlking/"

@@ -144,7 +144,7 @@ Each segment is an alist with `type' key.  Same format as
 (defvar-local agent-bridge--history-trim-in-progress nil
   "Non-nil while this buffer is trimming old agent-shell interactions.")
 
-(defcustom agent-bridge-max-visible-interactions 8
+(defcustom agent-bridge-max-visible-interactions nil
   "Maximum number of completed interactions to keep in an agent-shell buffer.
 When nil, automatic trimming is disabled.  Transcript files remain untouched."
   :type '(choice (const :tag "Disabled" nil)
@@ -242,7 +242,6 @@ If BUF is nil, trim the current buffer.  Only affects the visible Emacs buffer."
   "Trim old history in agent-shell buffers after output finishes."
   (agent-bridge-trim-buffer-history))
 
-(advice-add 'shell-maker-finish-output :after #'agent-bridge--trim-after-finish-output)
 
 (defun agent-bridge--finalize-chunk (buf)
   "Push current chunk as a segment in BUF and clear it."
