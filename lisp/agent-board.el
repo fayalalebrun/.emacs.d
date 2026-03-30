@@ -583,6 +583,7 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
       (opencode-autoconnect
        (lambda ()
          (let ((default-directory target))
+           (opencode-process-events target)
            (opencode-api-create-session (if title
                                             `((title . ,title))
                                           (make-hash-table))
@@ -593,18 +594,28 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
 
 (defun agent-board--open-workspace (dir)
   "Open the most recent OpenCode session for DIR or the project view."
-  (if-let ((buffer (agent-board--find-buffer-for-worktree dir)))
-      (pop-to-buffer buffer)
-    (agent-board--directory-sessions
-     dir
-     (lambda (sessions)
-       (if sessions
-           (opencode-open-session
-            (car (sort (copy-sequence sessions)
-                       (lambda (a b)
-                         (> (or (map-nested-elt a '(time updated)) 0)
-                            (or (map-nested-elt b '(time updated)) 0))))))
-         (opencode-open-project dir))))))
+  (let ((target (file-name-as-directory (expand-file-name dir))))
+    (if-let ((buffer (agent-board--find-buffer-for-worktree target)))
+        (progn
+          (opencode-process-events target)
+          (pop-to-buffer buffer))
+      (let ((sessions (agent-board--workspace-sessions target)))
+        (if sessions
+            (progn
+              (opencode-process-events target)
+              (opencode-open-session (car sessions)))
+          (agent-board--directory-sessions
+           target
+           (lambda (fetched-sessions)
+             (if fetched-sessions
+                 (progn
+                   (opencode-process-events target)
+                   (opencode-open-session
+                    (car (sort (copy-sequence fetched-sessions)
+                               (lambda (a b)
+                                 (> (or (map-nested-elt a '(time updated)) 0)
+                                    (or (map-nested-elt b '(time updated)) 0)))))))
+               (opencode-open-project target)))))))))
 
 (defun agent-board--mark-session-activity (&optional buffer)
   "Record activity time for OpenCode BUFFER or the current buffer."

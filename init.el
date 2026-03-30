@@ -746,6 +746,26 @@ Some packages/modes can transiently remap these during startup."
   :commands (agent-board)
   :bind (("C-c w" . agent-board)))
 
+(with-eval-after-load 'opencode-sessions
+  (defun my-opencode--slash-command-candidates ()
+    "Return slash-command completion candidates with safe descriptions."
+    (cl-loop for command in opencode-slash-commands
+             for name = (alist-get 'name command)
+             when (stringp name)
+             collect (list name name (or (alist-get 'description command) ""))))
+  (defun my-opencode-insert-slash-command-a (orig-fn &rest args)
+    "Handle slash commands with missing descriptions gracefully."
+    (if (= (point) (cdr comint-last-prompt))
+        (let ((command (opencode--annotated-completion
+                        "Slash command: "
+                        (my-opencode--slash-command-candidates))))
+          (insert (concat "/" command)))
+      (apply orig-fn args)))
+  (unless (advice-member-p #'my-opencode-insert-slash-command-a
+                           #'opencode-insert-slash-command)
+    (advice-add 'opencode-insert-slash-command :around
+                #'my-opencode-insert-slash-command-a)))
+
 (use-package ai-code
   :quelpa (ai-code :fetcher github :repo "tninja/ai-code-interface.el")
   :config
