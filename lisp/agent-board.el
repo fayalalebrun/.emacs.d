@@ -33,6 +33,15 @@
 (defvar agent-board--redraw-timer nil
   "Timer used to debounce board redraws.")
 
+(defvar-local agent-board--refresh-in-progress nil
+  "Non-nil while the current board buffer is being refreshed.")
+
+(defvar-local agent-board--refresh-pending nil
+  "Non-nil when another refresh should run after the current one.")
+
+(defvar-local agent-board--last-refresh-error nil
+  "Last refresh error string for the current board buffer.")
+
 (defvar agent-board-refresh-interval 3
   "Seconds between periodic board refreshes.")
 
@@ -138,17 +147,26 @@ When nil, new sessions keep OpenCode's default primary agent."
   (when (timerp agent-board--redraw-timer)
     (cancel-timer agent-board--redraw-timer))
   (setq agent-board--redraw-timer
-        (run-with-timer
+        (run-with-idle-timer
          agent-board-redraw-debounce-delay nil
          (lambda ()
-           (setq agent-board--redraw-timer nil)
-           (dolist (buf (buffer-list))
-             (when (and (buffer-live-p buf)
-                        (agent-board--visible-p buf))
-               (with-current-buffer buf
-                 (when (derived-mode-p 'agent-board-mode)
-                   (ignore-errors
-                     (agent-board-refresh))))))))))
+            (setq agent-board--redraw-timer nil)
+            (dolist (buf (buffer-list))
+              (when (and (buffer-live-p buf)
+                         (agent-board--visible-p buf))
+                (with-current-buffer buf
+                  (when (derived-mode-p 'agent-board-mode)
+                    (ignore-errors
+                      (agent-board-refresh))))))))))
+
+(defun agent-board--refresh-buffer-if-needed (buf)
+  "Refresh board BUF when it is live, visible, and in board mode."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'agent-board-mode)
+                 (agent-board--visible-p buf))
+        (ignore-errors
+          (agent-board-refresh))))))
 
 (defun agent-board--process-live-p (proc)
   "Return non-nil when PROC is a live process."
@@ -773,13 +791,25 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
   "Refresh the agent board using cached data only."
   (interactive)
   (when (derived-mode-p 'agent-board-mode)
-    (let ((windows (get-buffer-window-list (current-buffer) nil t)))
-      (let ((saved (mapcar (lambda (w) (cons w (window-point w))) windows)))
-        (setq tabulated-list-entries (agent-board--entries))
-        (tabulated-list-print t t)
-        (dolist (wp saved)
-          (when (window-live-p (car wp))
-            (set-window-point (car wp) (cdr wp))))))))
+    (if agent-board--refresh-in-progress
+        (setq agent-board--refresh-pending t)
+      (let* ((buf (current-buffer))
+             (windows (get-buffer-window-list buf nil t))
+             (saved (mapcar (lambda (w) (cons w (window-point w))) windows)))
+        (setq agent-board--refresh-in-progress t)
+        (setq agent-board--refresh-pending nil)
+        (unwind-protect
+            (progn
+              (setq agent-board--last-refresh-error nil)
+              (setq tabulated-list-entries (agent-board--entries))
+              (tabulated-list-print t t)
+              (dolist (wp saved)
+                (when (window-live-p (car wp))
+                  (set-window-point (car wp) (cdr wp)))))
+          (setq agent-board--refresh-in-progress nil)
+          (when agent-board--refresh-pending
+            (setq agent-board--refresh-pending nil)
+            (run-with-idle-timer 0 nil #'agent-board--refresh-buffer-if-needed buf)))))))
 
 (defun agent-board-jump ()
   "Jump to the agent buffer at point."
@@ -1009,8 +1039,8 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
       (condition-case err
           (agent-board-refresh)
         (error
-         (message "agent-board: refresh error: %s"
-                  (error-message-string err)))))))
+         (setq agent-board--last-refresh-error
+               (error-message-string err)))))))
 
 (defun agent-board--start-refresh-timer (&optional board-buf)
   "Start or restart the refresh timer for BOARD-BUF."
