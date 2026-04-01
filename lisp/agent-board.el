@@ -341,18 +341,14 @@ Starts an async refresh when needed.
   "Return status string for workspace WS."
   (let ((buf (agent-board-workspace-buffer ws))
         (server-status (agent-board--workspace-status-from-server
-                        (agent-board-workspace-worktree ws)))
-        (sessions (agent-board--workspace-sessions
-                   (agent-board-workspace-worktree ws))))
+                        (agent-board-workspace-worktree ws))))
     (cond
      ((and buf (buffer-live-p buf))
       (with-current-buffer buf
         (or (and (boundp 'opencode-session-status)
                  opencode-session-status)
-              server-status
-              "no-agent")))
-     (server-status server-status)
-     (sessions "idle")
+               server-status
+               "no-agent")))
      (t "no-agent"))))
 
 (defun agent-board--status-face (status)

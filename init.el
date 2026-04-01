@@ -979,10 +979,10 @@ Some packages/modes can transiently remap these during startup."
 	flycheck glsl-mode haskell-mode helm-lsp helm-projectile
 	helm-tramp lsp-metals lsp-pyright lsp-ui lua-mode neotree
 	nix-ts-mode no-littering opencode org-download org-roam
-	pdf-tools pgmacs platformio-mode prettier
-	prodigy quelpa-use-package rust-mode sbt-mode scala-ts-mode
-	separedit shell-command-x toml-mode typst-preview
-	typst-ts-mode web-server xelb yasnippet))
+	pdf-tools pgmacs platformio-mode prettier prodigy
+	quelpa-use-package rust-mode sbt-mode scala-ts-mode separedit
+	shell-command-x toml-mode typst-preview typst-ts-mode
+	web-server xelb yasnippet))
  '(package-vc-selected-packages
    '((opencode :url "https://codeberg.org/sczi/opencode.el.git")))
  '(pdf-tools-handle-upgrades nil)
