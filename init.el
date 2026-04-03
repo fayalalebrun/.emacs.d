@@ -720,7 +720,7 @@ Some packages/modes can transiently remap these during startup."
   :ensure t)
 
 (use-package opencode
-  :vc (:url "https://codeberg.org/sczi/opencode.el.git" :rev :newest)
+  :load-path "vendor/opencode"
   :commands (opencode
              opencode-connect
              opencode-disconnect
@@ -972,8 +972,8 @@ Some packages/modes can transiently remap these during startup."
      "%latex -interaction nonstopmode -output-directory %o %f"
      "%latex -interaction nonstopmode -output-directory %o %f"))
  '(org-startup-truncated nil)
- '(package-selected-packages
-   '(ag age agent-shell agent-shell-manager ai-code auctex cargo
+  '(package-selected-packages
+    '(ag age agent-shell agent-shell-manager ai-code auctex cargo
 	clang-format claude-code code-cells comint-mime company dash
 	deadgrep eat ement emms envrc exec-path-from-shell eyebrowse
 	flycheck glsl-mode haskell-mode helm-lsp helm-projectile
@@ -983,9 +983,8 @@ Some packages/modes can transiently remap these during startup."
 	quelpa-use-package rust-mode sbt-mode scala-ts-mode separedit
 	shell-command-x toml-mode typst-preview typst-ts-mode
 	web-server xelb yasnippet))
- '(package-vc-selected-packages
-   '((opencode :url "https://codeberg.org/sczi/opencode.el.git")))
- '(pdf-tools-handle-upgrades nil)
+  '(package-vc-selected-packages nil)
+  '(pdf-tools-handle-upgrades nil)
  '(safe-local-variable-directories
    '("/home/fal/Sync/rtlking/" "/home/fal/Default Folder/rtlking/"
      "/home/fal/sources/rtlking/"))
