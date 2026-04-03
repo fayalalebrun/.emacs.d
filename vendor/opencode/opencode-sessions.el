@@ -41,12 +41,16 @@
     "g" nil
     "SPC" nil
     "n" 'opencode-new-session
+    "t" 'opencode-session-control-toggle-tree
     "M" 'opencode-toggle-mcp
     "U" 'opencode-unshare-all-sessions
     "v" 'opencode-session-control-toggle-verbose))
 
 (defvar-local opencode-session-control-verbose nil
   "Toggle whether to display subagents in session control buffer.")
+
+(defvar-local opencode-session-control-tree-view t
+  "Toggle whether to display sessions as a parent/child tree.")
 
 (define-derived-mode opencode-session-control-mode special-mode "Sessions"
   "Opencode session control panel mode.")
@@ -79,6 +83,7 @@
   (evil-define-key* 'normal opencode-session-control-mode-map
     "r" 'opencode-sessions-redisplay
     "n" 'opencode-new-session
+    "gt" 'opencode-session-control-toggle-tree
     "gv" 'opencode-session-control-toggle-verbose)
   (evil-define-key* 'insert opencode-session-mode-map
     "/" 'opencode-insert-slash-command))
@@ -190,6 +195,103 @@ POP-TO-BUFFER controls whether to pop to or switch to the session buffer."
   "Select a session that hasn't been visited since it went idle."
   (interactive)
   (opencode--select-sessions "Session: " opencode-alerted-sessions "No idle sessions"))
+
+(defun opencode--sessions-for-directory (sessions directory)
+  "Return SESSIONS whose `directory' matches DIRECTORY."
+  (let ((target (and directory
+                     (file-directory-p directory)
+                     (file-name-as-directory (file-truename directory)))))
+    (if (not target)
+        sessions
+      (seq-filter
+       (lambda (session)
+         (let ((session-dir (alist-get 'directory session)))
+           (and session-dir
+                (file-directory-p session-dir)
+                (file-equal-p (file-name-as-directory
+                               (file-truename session-dir))
+                              target))))
+       sessions))))
+
+(defun opencode--session-sort-key (session)
+  "Return a numeric sort key for SESSION."
+  (or (map-nested-elt session '(time updated))
+      (map-nested-elt session '(time created))
+      0))
+
+(defun opencode--session-tree-prefix (depth ancestors lastp)
+  "Return a tree prefix for a node at DEPTH from ANCESTORS and LASTP.
+ANCESTORS records whether ancestor nodes were the last sibling."
+  (concat
+   (mapconcat (lambda (ancestor-lastp)
+                (if ancestor-lastp "   " "│  "))
+              ancestors
+              "")
+   (if (> depth 0)
+       (if lastp "└─ " "├─ ")
+     "")))
+
+(defun opencode--session-tree-entries (sessions)
+  "Return SESSIONS ordered as a tree with metadata.
+Each returned object is a copy of the original session alist with extra
+`treeDepth', `treeHasChildren', and `treePrefix' fields." 
+  (let ((children (make-hash-table :test 'equal))
+        roots
+        result)
+    (dolist (session sessions)
+      (if-let ((parent-id (alist-get 'parentID session)))
+          (push session (gethash parent-id children))
+        (push session roots)))
+    (cl-labels
+        ((sorted (items)
+           (sort items
+                 (lambda (a b)
+                   (> (opencode--session-sort-key a)
+                      (opencode--session-sort-key b)))))
+         (visit (session depth ancestors lastp)
+           (let* ((session-id (alist-get 'id session))
+                  (child-sessions (sorted (copy-sequence (gethash session-id children))))
+                  (entry (copy-tree session)))
+             (setf (alist-get 'treeDepth entry) depth)
+             (setf (alist-get 'treeHasChildren entry) (and child-sessions t))
+             (setf (alist-get 'treePrefix entry)
+                   (opencode--session-tree-prefix depth ancestors lastp))
+             (push entry result)
+             (cl-loop for child in child-sessions
+                      for idx from 0
+                      for child-lastp = (= idx (1- (length child-sessions)))
+                      do (visit child (1+ depth)
+                                (if (zerop depth)
+                                    ancestors
+                                  (append ancestors (list lastp)))
+                                child-lastp)))))
+      (let ((sorted-roots (sorted roots)))
+        (cl-loop for root in sorted-roots
+                 for idx from 0
+                 for lastp = (= idx (1- (length sorted-roots)))
+                 do (visit root 0 nil lastp))))
+    (nreverse result)))
+
+(defun opencode-session-control-open-or-fork (session)
+  "Open SESSION when it is a leaf, otherwise fork it first."
+  (if (alist-get 'treeHasChildren session)
+      (opencode-session-control-fork-session session)
+    (opencode-open-session session)))
+
+(defun opencode-session-control-fork-session (session)
+  "Fork SESSION and open the new fork."
+  (interactive)
+  (opencode-api-fork-session ((alist-get 'id session))
+      (make-hash-table)
+      forked-session
+    (opencode-open-session forked-session)))
+
+(defun opencode-session-control-toggle-tree ()
+  "Toggle tree view in the session control buffer."
+  (interactive)
+  (setq opencode-session-control-tree-view
+        (not opencode-session-control-tree-view))
+  (opencode-sessions-redisplay))
 
 (defun opencode--collect-all-models ()
   "Collect all models from `opencode-providers' as a list.
@@ -969,45 +1071,52 @@ Returns nil if point is before the first prompt."
   "Refresh the session display table for DIRECTORY."
   (interactive)
   (opencode-api-sessions sessions
-    (let ((inhibit-read-only t)
-          (point (point))
-          (sessions (if opencode-session-control-verbose
-                        sessions
-                      (seq-remove (lambda (session)
-                                    (alist-get 'parentID session))
-                                  sessions)))
-          cache)
+    (let* ((inhibit-read-only t)
+           (point (point))
+           (sessions (opencode--sessions-for-directory sessions default-directory))
+           (sessions (if opencode-session-control-tree-view
+                         (opencode--session-tree-entries sessions)
+                       (if opencode-session-control-verbose
+                           sessions
+                         (seq-remove (lambda (session)
+                                       (alist-get 'parentID session))
+                                     sessions))))
+           cache)
       (erase-buffer)
       (if sessions
           (make-vtable
-           :columns '("Title"
+            :columns '("Title"
                       (:name "Branch" :min-width 6)
                       (:name "Last Updated" :width 12
                        :formatter opencode--format-time-ago
                        :primary ascend)
-                      (:name "Files changed" :width 13 :align right)
-                      (:name "Created at" :width 10
-                       :formatter opencode--format-time-ago))
-           :objects sessions
-           :actions '("x" opencode-kill-session
-                      "R" opencode-rename-session
-                      "s" opencode-share-session
-                      "u" opencode-unshare-session
-                      "RET" opencode-open-session
-                      "o" opencode-open-session)
-           :getter (lambda (object column vtable)
-                     (let-alist object
-                       (pcase (vtable-column vtable column)
-                         ("Title" (if .share
-                                      (concat (propertize "shared " 'face
-                                                          '(bold opencode-request-margin-highlight))
-                                              .title)
-                                    .title))
-                         ("Branch" (if (and .directory (file-exists-p .directory))
-                                       (let ((default-directory .directory))
-                                         (with-memoization
-                                             (map-elt cache .directory)
-                                           (magit-get-current-branch)))
+                       (:name "Files changed" :width 13 :align right)
+                       (:name "Created at" :width 10
+                        :formatter opencode--format-time-ago))
+            :objects sessions
+            :actions '("x" opencode-kill-session
+                       "f" opencode-session-control-fork-session
+                       "R" opencode-rename-session
+                       "s" opencode-share-session
+                       "u" opencode-unshare-session
+                       "RET" opencode-session-control-open-or-fork
+                       "o" opencode-open-session)
+            :getter (lambda (object column vtable)
+                      (let-alist object
+                        (pcase (vtable-column vtable column)
+                          ("Title" (let ((title (if .share
+                                                    (concat (propertize "shared " 'face
+                                                                        '(bold opencode-request-margin-highlight))
+                                                            .title)
+                                                  .title)))
+                                     (if opencode-session-control-tree-view
+                                         (concat (or .treePrefix "") title)
+                                       title)))
+                          ("Branch" (if (and .directory (file-exists-p .directory))
+                                        (let ((default-directory .directory))
+                                          (with-memoization
+                                              (map-elt cache .directory)
+                                            (magit-get-current-branch)))
                                      "-"))
                          ("Last Updated" (opencode--time-ago object 'updated))
                          ("Files changed" (let-alist .summary
@@ -1019,9 +1128,9 @@ Returns nil if point is before the first prompt."
                                                           0 .additions)
                                                       (if (opencode--json-falsy .deletions)
                                                           0 .deletions)))))
-                         ("Created at" (opencode--time-ago object 'created)))))
-           :separator-width 3
-           :keymap opencode-session-control-mode-map)
+                          ("Created at" (opencode--time-ago object 'created)))))
+            :separator-width 3
+            :keymap opencode-session-control-mode-map)
         (insert "No sessions in " (or default-directory "unknown directory")))
       (goto-char point))))
 
