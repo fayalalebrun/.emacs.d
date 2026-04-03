@@ -480,30 +480,43 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
             (let ((buf-dir (buffer-local-value 'default-directory buf)))
               (and buf-dir
                    (file-directory-p buf-dir)
-                   (file-equal-p (file-truename buf-dir) target)))))
+                    (file-equal-p (file-truename buf-dir) target)))))
      (agent-board--agent-buffers))))
+
+(defun agent-board--filter-sessions-for-directory (sessions dir)
+  "Return SESSIONS whose directory matches DIR."
+  (let ((target (file-name-as-directory (file-truename dir))))
+    (seq-filter
+     (lambda (session)
+       (and (not (alist-get 'parentID session))
+            (let ((session-dir (alist-get 'directory session)))
+              (and session-dir
+                   (file-directory-p session-dir)
+                   (file-equal-p (file-name-as-directory
+                                  (file-truename session-dir))
+                                 target)))))
+     sessions)))
 
 (defun agent-board--directory-sessions (dir on-success)
   "Call ON-SUCCESS with top-level OpenCode sessions for DIR."
-  (let ((target (file-name-as-directory (expand-file-name dir))))
-    (let ((default-directory target))
-      (opencode-autoconnect
-       (lambda ()
-         (let ((default-directory target))
-           (opencode-api-sessions sessions
-             (funcall
-              on-success
-              (seq-filter
-               (lambda (session)
-                 (and (not (alist-get 'parentID session))
-                      (let ((session-dir (alist-get 'directory session)))
-                        (and session-dir
-                             (file-directory-p session-dir)
-                             (file-equal-p (file-name-as-directory
-                                            (file-truename session-dir))
-                                           (file-name-as-directory
-                                            (file-truename target)))))))
-               sessions)))))))))
+  (let* ((target (file-name-as-directory (expand-file-name dir)))
+         (repo (agent-board--repo-key target)))
+    (cl-labels
+        ((fetch (request-dir fallback-p)
+           (let ((default-directory request-dir))
+             (opencode-autoconnect
+              (lambda ()
+                (let ((default-directory request-dir))
+                  (opencode-api-sessions sessions
+                    (let ((matches (agent-board--filter-sessions-for-directory
+                                    sessions target)))
+                      (if (or matches
+                              fallback-p
+                              (not repo)
+                              (file-equal-p request-dir repo))
+                          (funcall on-success matches)
+                        (fetch (file-name-as-directory repo) t))))))))))
+      (fetch target nil))))
 
 (defun agent-board--directory-session-statuses (dir on-success)
   "Call ON-SUCCESS with OpenCode session statuses for DIR."
