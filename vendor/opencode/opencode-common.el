@@ -39,6 +39,16 @@
 (defvar opencode-slash-commands nil
   "List of available slash commands.")
 
+(defvar opencode-server-slash-commands nil
+  "List of server-provided slash commands from the `/command' endpoint.")
+
+(defvar opencode-builtin-slash-commands
+  '(((name . "compact")
+     (description . "Compact the current session context")
+     (handler . opencode--slash-command-compact)
+     (aliases . ["summarize"])))
+  "List of built-in slash commands handled by the Emacs client.")
+
 (defvar opencode-alerted-sessions nil
   "List of unvisited idle sessions.")
 

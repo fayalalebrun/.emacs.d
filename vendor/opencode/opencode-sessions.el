@@ -398,14 +398,49 @@ Each element is (display-name . (provider-id provider-name model-id))."
   (if (= (point) (cdr comint-last-prompt))
       (let ((command (opencode--annotated-completion
                       "Slash command: "
-                      (cl-loop for command in opencode-slash-commands
-                               collect (let-alist command
-                                         (list
-                                          .name
-                                          .name
-                                          .description))))))
+                       (cl-loop for command in opencode-slash-commands
+                               append (let-alist command
+                                        (cl-loop for name in (opencode--slash-command-names command)
+                                                 collect (list
+                                                          name
+                                                          name
+                                                          .description)))))))
         (insert (concat "/" command)))
     (call-interactively #'self-insert-command)))
+
+(defun opencode--slash-command-names (command)
+  "Return completion names for slash COMMAND."
+  (cons (alist-get 'name command)
+        (append (append (alist-get 'aliases command nil nil #'equal) nil)
+                nil)))
+
+(defun opencode--lookup-slash-command (name)
+  "Return slash command matching NAME, including aliases."
+  (seq-find (lambda (command)
+              (member name (opencode--slash-command-names command)))
+            opencode-slash-commands))
+
+(defun opencode--dispatch-slash-command (string)
+  "Dispatch slash command STRING locally when supported.
+Return non-nil when the command was handled by the client."
+  (when (string-match "^/\\([^ ]*\\) ?\\(.*\\)$" string)
+    (when-let* ((command-name (match-string 1 string))
+                (arguments (match-string 2 string))
+                (command (opencode--lookup-slash-command command-name))
+                (handler (alist-get 'handler command)))
+      (funcall handler arguments)
+      t)))
+
+(defun opencode--slash-command-compact (_arguments)
+  "Compact the current session context."
+  (let-alist opencode-session-agent
+    (opencode-api-summarize-session
+        (opencode-session-id)
+        `((providerID . ,.model.providerID)
+          (modelID . ,.model.modelID)
+          (auto . :json-false))
+        _result
+      (message "Requested session compaction"))))
 
 (defun opencode--session-status-indicator ()
   "Return mode line indicator for session status."
@@ -609,22 +644,24 @@ Otherwise prompt for file in current project."
   (opencode--highlight-input)
   (opencode--output "\n")
   (let-alist opencode-session-agent
-    (if (string-match "^/\\([^ ]*\\) ?\\(.*\\)$" string)
+    (if (opencode--dispatch-slash-command string)
+        nil
+      (if (string-match "^/\\([^ ]*\\) ?\\(.*\\)$" string)
         (opencode-api-execute-command (opencode-session-id)
             `((agent . ,.name)
               (model . ,(concat .model.providerID "/" .model.modelID))
               (command . ,(match-string 1 string))
               (arguments . ,(match-string 2 string)))
             _response)
-      (opencode-api-send-message (opencode-session-id)
-          `((agent . ,.name)
-            ,(assoc 'model opencode-session-agent)
-            (variant . ,(or opencode-session-variant ""))
-            (parts . ,(nreverse
-                       (cons `((type . text) (text . ,string))
-                             opencode--extra-parts))))
-          _result)
-      (setf opencode--extra-parts nil))))
+        (opencode-api-send-message (opencode-session-id)
+            `((agent . ,.name)
+              ,(assoc 'model opencode-session-agent)
+              (variant . ,(or opencode-session-variant ""))
+              (parts . ,(nreverse
+                         (cons `((type . text) (text . ,string))
+                               opencode--extra-parts))))
+            _result)
+        (setf opencode--extra-parts nil)))))
 
 (defun opencode-session--message-updated (info)
   "Handle message.updated event with INFO."

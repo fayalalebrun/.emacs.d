@@ -193,9 +193,12 @@ if `opencode-auto-start-server' is non-nil."
   (when opencode--event-subscriptions
     (user-error "Already connected"))
   (setq opencode-api-url (format "http://%s:%d" host port))
+  (setq opencode-slash-commands opencode-builtin-slash-commands)
   (opencode--fetch-agents)
   (opencode-api-commands commands
-    (setq opencode-slash-commands commands))
+    (setq opencode-server-slash-commands commands
+          opencode-slash-commands
+          (append opencode-builtin-slash-commands commands)))
   (opencode-api-configured-providers result
     (setq opencode-providers (alist-get 'providers result)))
   (message "Connected to %s" opencode-api-url))

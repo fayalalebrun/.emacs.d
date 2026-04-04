@@ -721,6 +721,7 @@ Some packages/modes can transiently remap these during startup."
 
 (use-package opencode
   :load-path "vendor/opencode"
+  :demand t
   :commands (opencode
              opencode-connect
              opencode-disconnect
