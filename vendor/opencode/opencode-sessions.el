@@ -78,6 +78,14 @@
     "C-c R" 'opencode-revert-message
     "/" 'opencode-insert-slash-command))
 
+(defun opencode-insert-newline ()
+  "Insert a newline in the current prompt without sending input."
+  (interactive)
+  (newline))
+
+(keymap-set opencode-session-mode-map "M-RET" #'opencode-insert-newline)
+(keymap-set opencode-session-mode-map "S-RET" #'opencode-insert-newline)
+
 (with-eval-after-load 'evil
   (declare-function evil-define-key* "evil-core")
   (evil-define-key* 'normal opencode-session-control-mode-map
@@ -110,6 +118,15 @@ Buffer local so we can configure models per agent per session.")
 (defvar-local opencode-session-pending-questions nil
   "Pending questions for this session buffer, awaiting user response.
 When non-nil, contains a cons cell (QUESTION-ID . QUESTIONS-VECTOR).")
+
+(defvar-local opencode--active-prompt-margin-overlay nil
+  "Overlay used to extend prompt margin highlighting while editing input.")
+
+(defvar-local opencode--active-prompt-cursor-overlay nil
+  "Zero-width overlay used to show prompt margin on the current empty line.")
+
+(defvar-local opencode--prompt-active nil
+  "Non-nil when the session buffer currently has an editable prompt.")
 
 (defvar opencode-session-buffers
   (make-hash-table :test 'equal)
@@ -483,6 +500,7 @@ Return non-nil when the command was handled by the client."
   (visual-line-mode)
   (font-lock-mode -1)
   (cursor-intangible-mode)
+  (add-hook 'after-change-functions 'opencode--update-active-prompt-margin nil t)
   (add-hook 'comint-input-filter-functions 'opencode--render-input-markdown nil t))
 
 (defun opencode-yank-code-block ()
@@ -641,6 +659,11 @@ Otherwise prompt for file in current project."
 
 (defun opencode--send-input (_proc string)
   "Send STRING as input to current opencode session."
+  (setq opencode--prompt-active nil)
+  (when (overlayp opencode--active-prompt-margin-overlay)
+    (delete-overlay opencode--active-prompt-margin-overlay))
+  (when (overlayp opencode--active-prompt-cursor-overlay)
+    (delete-overlay opencode--active-prompt-cursor-overlay))
   (opencode--highlight-input)
   (opencode--output "\n")
   (let-alist opencode-session-agent
@@ -724,10 +747,27 @@ Otherwise prompt for file in current project."
 (defun opencode--show-prompt ()
   "Highlight the prompt after displaying output."
   (opencode--output (propertize "> " 'invisible t))
-  (opencode--add-margin (car comint-last-prompt)
-                        (cdr comint-last-prompt)
-                        'opencode-request-margin-highlight)
+  (setq opencode--prompt-active t)
+  (opencode--update-active-prompt-margin)
   (goto-char (point-max)))
+
+(defun opencode--update-active-prompt-margin (&rest _)
+  "Extend prompt margin highlighting across the editable input region."
+  (when (overlayp opencode--active-prompt-margin-overlay)
+    (delete-overlay opencode--active-prompt-margin-overlay))
+  (when (overlayp opencode--active-prompt-cursor-overlay)
+    (delete-overlay opencode--active-prompt-cursor-overlay))
+  (when (and opencode--prompt-active
+             comint-last-prompt)
+    (let ((start (car comint-last-prompt))
+          (end (max (1+ (car comint-last-prompt))
+                    (point-max)))
+          (margin (opencode--margin 'opencode-request-margin-highlight)))
+      (setq opencode--active-prompt-margin-overlay (make-overlay start end))
+      (overlay-put opencode--active-prompt-margin-overlay 'line-prefix margin)
+      (overlay-put opencode--active-prompt-margin-overlay 'wrap-prefix margin)
+      (setq opencode--active-prompt-cursor-overlay (make-overlay end end))
+      (overlay-put opencode--active-prompt-cursor-overlay 'before-string margin))))
 
 (defun opencode-session--update-part (part delta type)
   "Display PART, partial message output. DELTA is new text since last update.
@@ -819,9 +859,13 @@ TYPE is text|reasoning|tool|step-finish"
 (defun opencode--render-input-markdown (input)
   "Rerender comint INPUT as markdown."
   (let ((inhibit-read-only t))
-    (delete-region (opencode--session-process-position)
-                   (point))
-    (insert (opencode--render-markdown input))))
+    (let ((start (opencode--session-process-position)))
+      (delete-region start (point))
+      (goto-char start)
+      (insert (opencode--render-markdown input))
+      (opencode--add-margin start
+                            (point)
+                            'opencode-request-margin-highlight))))
 
 (defun opencode--replay-user-request (message)
   "Replay a user request MESSAGE."
