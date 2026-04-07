@@ -339,9 +339,14 @@ Starts an async refresh when needed.
 
 (defun agent-board--status (ws)
   "Return status string for workspace WS."
-  (let ((buf (agent-board-workspace-buffer ws))
+  (let* ((worktree (agent-board-workspace-worktree ws))
+         (sessions (agent-board--workspace-sessions worktree))
+         (buf (and (agent-board--live-server-buffer-p
+                    (agent-board-workspace-buffer ws)
+                    sessions)
+                   (agent-board-workspace-buffer ws)))
          (server-status (agent-board--workspace-status-from-server
-                         (agent-board-workspace-worktree ws))))
+                         worktree)))
     (cond
      ((and buf (buffer-live-p buf))
       (with-current-buffer buf
@@ -486,6 +491,27 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
                     (file-equal-p (file-truename buf-dir) target)))))
      (agent-board--agent-buffers))))
 
+(defun agent-board--buffer-session-id (buf)
+  "Return the OpenCode session id for BUF, or nil."
+  (and (buffer-live-p buf)
+       (buffer-local-value 'opencode-session-id buf)))
+
+(defun agent-board--session-ids (sessions)
+  "Return the list of session ids in SESSIONS."
+  (mapcar (lambda (session)
+            (alist-get 'id session))
+          sessions))
+
+(defun agent-board--live-server-buffer-p (buf sessions)
+  "Return non-nil when BUF belongs to one of SESSIONS.
+
+When SESSIONS is nil, treat BUF as unknown rather than live so stale buffers do
+not mask a server restart." 
+  (and buf
+       (buffer-live-p buf)
+       (member (agent-board--buffer-session-id buf)
+               (agent-board--session-ids sessions))))
+
 (defun agent-board--filter-sessions-for-directory (sessions dir)
   "Return SESSIONS whose directory matches DIR."
   (let ((target (file-name-as-directory (file-truename dir))))
@@ -625,11 +651,16 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
 (defun agent-board--open-workspace (dir)
   "Open the most recent OpenCode session for DIR or the project view."
   (let ((target (file-name-as-directory (expand-file-name dir))))
-    (if-let ((buffer (agent-board--find-buffer-for-worktree target)))
+    (let* ((sessions (agent-board--workspace-sessions target))
+           (buffer (and sessions
+                        (agent-board--live-server-buffer-p
+                         (agent-board--find-buffer-for-worktree target)
+                         sessions)
+                        (agent-board--find-buffer-for-worktree target))))
+      (if buffer
         (progn
           (opencode-process-events target)
           (pop-to-buffer buffer))
-      (let ((sessions (agent-board--workspace-sessions target)))
         (if sessions
             (progn
               (opencode-process-events target)
@@ -645,7 +676,7 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
                                (lambda (a b)
                                  (> (or (map-nested-elt a '(time updated)) 0)
                                     (or (map-nested-elt b '(time updated)) 0)))))))
-               (opencode-open-project target)))))))))
+                (opencode-open-project target)))))))))
 
 (defun agent-board--mark-session-activity (&optional buffer)
   "Record activity time for OpenCode BUFFER or the current buffer."
@@ -727,18 +758,20 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
               (let ((raw-path (car wt)))
                 (when (file-directory-p raw-path)
                   (let* ((path (file-truename raw-path))
-                         (branch (or (nth 2 wt) "(detached)"))
-                         (matched-buf
-                          (cl-find-if
-                           (lambda (buf)
-                             (let ((dir (and (buffer-live-p buf)
-                                             (buffer-local-value 'default-directory buf))))
-                               (and dir
-                                    (file-directory-p dir)
-                                    (file-equal-p dir path))))
-                           ai-bufs)))
-                    (push (make-agent-board-workspace
-                           :project project
+                          (branch (or (nth 2 wt) "(detached)"))
+                          (sessions (agent-board--workspace-sessions path))
+                          (matched-buf
+                           (cl-find-if
+                            (lambda (buf)
+                              (and (agent-board--live-server-buffer-p buf sessions)
+                                   (let ((dir (and (buffer-live-p buf)
+                                                   (buffer-local-value 'default-directory buf))))
+                                     (and dir
+                                          (file-directory-p dir)
+                                          (file-equal-p dir path)))))
+                            ai-bufs)))
+                     (push (make-agent-board-workspace
+                            :project project
                            :toplevel toplevel
                            :branch branch
                            :worktree path
@@ -782,16 +815,18 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
                         (agent-board--process-rss-kib proc snapshot))))
          (puthash path ws agent-board--workspaces)
          (list path
-               (vector
-                (propertize status 'face (agent-board--status-face status))
-                 (agent-board-workspace-project ws)
-                 (or (agent-board-workspace-task ws) "-")
-                 (agent-board-workspace-branch ws)
-                 (if pid (number-to-string pid) "-")
-                 (agent-board--format-age (or last-activity last-session-time))
-                 memory
-                 (agent-board--format-tokens-used buf)
-                 (abbreviate-file-name path)))))
+                (vector
+                 (propertize status 'face (agent-board--status-face status))
+                  (agent-board-workspace-project ws)
+                  (or (agent-board-workspace-task ws) "-")
+                  (agent-board-workspace-branch ws)
+                  (if pid (number-to-string pid) "-")
+                  (if (string= status "busy")
+                      (agent-board--format-age (or last-activity last-session-time))
+                    "")
+                  memory
+                  (agent-board--format-tokens-used buf)
+                  (abbreviate-file-name path)))))
      workspaces)))
 
 (defun agent-board--workspace-at-point ()
