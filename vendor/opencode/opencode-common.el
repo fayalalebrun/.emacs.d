@@ -24,8 +24,12 @@
 
 ;;; Code:
 
+(require 'button)
 (require 'cl-lib)
 (require 'map)
+(require 'markdown-mode)
+(require 'notifications)
+(require 'project)
 (require 'savehist)
 
 (defvar opencode-last-model '((providerID . "opencode")
@@ -34,20 +38,10 @@
 (add-to-list 'savehist-additional-variables 'opencode-last-model)
 
 (defvar opencode-agents nil
-  "List of available primary agents (excluding sub-agents and hidden agents).")
+  "List of available agents excluding hidden agents.")
 
 (defvar opencode-slash-commands nil
   "List of available slash commands.")
-
-(defvar opencode-server-slash-commands nil
-  "List of server-provided slash commands from the `/command' endpoint.")
-
-(defvar opencode-builtin-slash-commands
-  '(((name . "compact")
-     (description . "Compact the current session context")
-     (handler . opencode--slash-command-compact)
-     (aliases . ["summarize"])))
-  "List of built-in slash commands handled by the Emacs client.")
 
 (defvar opencode-alerted-sessions nil
   "List of unvisited idle sessions.")
@@ -92,6 +86,19 @@ for title, message, variant (error/warning/info/success), and duration"
   :type 'boolean
   :group 'opencode)
 
+(defcustom opencode-redact-hidden-tool-output t
+  "Redact completed tool output from live events when it is hidden.
+This only affects the Emacs client-side copy of live SSE events.  It does
+not change what the opencode server stores or what the model sees."
+  :type 'boolean
+  :group 'opencode)
+
+(defcustom opencode-redacted-tool-output-placeholder
+  "[tool output redacted by opencode.el]"
+  "Placeholder used for redacted hidden tool output."
+  :type 'string
+  :group 'opencode)
+
 (defun opencode--time-ago (opencode-object type)
   "Return .time.TYPE value from OPENCODE-OBJECT, as seconds ago.
 Returns nil if the timestamp is not present."
@@ -118,30 +125,41 @@ Returns \"-\" if SECONDS is nil."
     (forward-line (- (/ max-lines 2)))
     (delete-region (point-min) (point))))
 
-(defun opencode--annotated-completion (prompt candidates)
-  "Simplified and formatted completing read with PROMPT.
-CANDIDATES is a list of lists, where the first element of each list is the
-string to show, the second is the value to return, and the third is the
-annotation to show."
+(cl-defun opencode--annotated-completion (prompt candidates)
+  "Read a candidate with PROMPT and annotations.
+CANDIDATES is a list of lists, where the first element is the string to show,
+the second is the value to return, the third is the annotation to show, and
+the optional fourth element is a number to sort by."
   (let* ((max-length (seq-max
                       (mapcar (lambda (candidate)
                                 (length (car candidate)))
                               candidates)))
          (candidate-results (make-hash-table :test 'equal))
-         (candidates (cl-loop for (name return-value annotation) in candidates
+         (has-sort-values nil)
+         (candidates (cl-loop for (name return-value maybe-annotation sort-value) in candidates
+                              for annotation = (or maybe-annotation "")
                               for candidate = (concat name
                                                       (propertize annotation 'invisible t))
+                              when sort-value do (setf has-sort-values t)
                               do (puthash candidate return-value candidate-results)
                               collect (propertize candidate
                                                   'opencode-annotation
                                                   (concat (make-string (+ 5 (- max-length
                                                                                (length name)))
                                                                        ?\s)
-                                                          annotation))))
+                                                          annotation)
+                                                  'opencode-sort-value sort-value)))
          (completion-extra-properties
           `(:annotation-function
             ,(lambda (candidate)
-               (get-text-property 0 'opencode-annotation candidate)))))
+               (get-text-property 0 'opencode-annotation candidate))
+            :display-sort-function
+            ,(when has-sort-values
+               (lambda (candidates)
+                 (sort candidates
+                       (lambda (a b)
+                         (< (get-text-property 0 'opencode-sort-value a)
+                            (get-text-property 0 'opencode-sort-value b)))))))))
     (gethash
      (completing-read
       prompt
@@ -155,6 +173,121 @@ annotation to show."
    (cl-loop for q being the elements of questions
             for question-text = (alist-get 'question q)
             collect (concat "❓ " question-text "\n"))))
+
+(defun opencode--relative-path-for-display (file)
+  "Return FILE relative to project root when possible."
+  (when file
+    (let* ((project (project-current))
+           (root (if project
+                     (project-root project)
+                   default-directory)))
+      (if (and (file-name-absolute-p file)
+               root
+               (file-in-directory-p file root))
+          (file-relative-name file root)
+        file))))
+
+(defun opencode--resolve-file-reference (file)
+  "Return absolute path for FILE, or nil if no file exists."
+  (let ((project (project-current)))
+    (seq-find (lambda (candidate)
+                (and candidate
+                     (file-exists-p candidate)
+                     (not (file-directory-p candidate))))
+              (delete-dups
+               (delq nil
+                     (list (and (file-name-absolute-p file) file)
+                           (when project
+                             (expand-file-name file (project-root project)))
+                           (expand-file-name file default-directory)))))))
+
+(defun opencode--visit-file-location (location)
+  "Open LOCATION in another window."
+  (let ((file (car location))
+        (line (cdr location)))
+    (find-file-other-window file)
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (recenter)))
+
+(defun opencode--buttonize-file-references (string)
+  "Return STRING with existing file references turned into buttons."
+  (let ((start 0)
+        (regexp "\\(`?\\)\\([[:alnum:]._~/][[:alnum:]@%_./~+-]*\\):\\([0-9]+\\)\\1")
+        parts)
+    (while (string-match regexp string start)
+      (let* ((match-beg (match-beginning 0))
+             (match-end (match-end 0))
+             (file (match-string 2 string))
+             (line (string-to-number (match-string 3 string)))
+             (path (opencode--resolve-file-reference file)))
+        (push (substring string start match-beg) parts)
+        (push (if path
+                  (make-text-button
+                   (substring string match-beg match-end)
+                   nil
+                   'action #'opencode--visit-file-location
+                   'button-data (cons path line)
+                   'follow-link t
+                   'help-echo (format "Open %s:%d in another window" file line)
+                   'mouse-face 'highlight)
+                (substring string match-beg match-end))
+              parts)
+        (setq start match-end)))
+    (push (substring string start) parts)
+    (apply #'concat (nreverse parts))))
+
+(defun opencode--render-markdown (string)
+  "Render STRING in `gfm-view-mode'."
+  (with-temp-buffer
+    (insert string)
+    (delay-mode-hooks (gfm-view-mode))
+    (font-lock-ensure)
+    (buffer-string)))
+
+(defun opencode--default-toast-show (properties)
+  "Default notifier to show notification with PROPERTIES from opencode."
+  (let-alist properties
+    (cond
+     ((featurep 'dbusbind)
+      (notifications-notify
+       :title .title
+       :body .message
+       :urgency (pcase .variant
+                  ((or "error" "warning" )'critical)
+                  ((or "info" "success") 'normal))
+       :timeout (or .duration 5000)
+       :replaces-id 5647
+       :app-icon 'none))
+     ((eq system-type 'darwin)
+      (let ((title (concat (pcase .variant
+                             ("error" "❌")
+                             ("warning" "⚠️")
+                             ((or "info" "success") "ℹ️"))
+                           " " .title)))
+        (if (executable-find "terminal-notifier")
+            (start-process "opencode-notification" nil "terminal-notifier"
+                           "-title" title
+                           "-message" .message
+                           "-group" "opencode-toast"
+                           "-activate" "org.gnu.Emacs"
+                           "-sound" (pcase .variant
+                                      ((or "error" "warning") "Basso")
+                                      (_ "default")))
+          (start-process "opencode-notification" nil "osascript" "-e"
+                         (format "display notification %S with title %S"
+                                 .message
+                                 title))))))))
+
+(defun opencode--toast-show (properties)
+  "Show toast notification with PROPERTIES from opencode."
+  (funcall opencode-toast-function properties))
+
+(defun opencode--buffer-active-p (buffer)
+  "Return non-nil if BUFFER is visible in the selected window of a focused frame."
+  (and buffer
+       (eq buffer (window-buffer (selected-window)))
+       (frame-focus-state (window-frame (selected-window)))))
 
 (provide 'opencode-common)
 ;;; opencode-common.el ends here

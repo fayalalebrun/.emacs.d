@@ -30,9 +30,9 @@
 
 (require 'json)
 (require 'magit)
-(require 'notifications)
 (require 'opencode-api)
 (require 'opencode-common)
+(require 'opencode-permission)
 (require 'opencode-question)
 (require 'opencode-sessions)
 (require 'plz-media-type)
@@ -85,8 +85,29 @@ When nil, `opencode' will only connect to an already running server."
   :type 'boolean
   :group 'opencode)
 
+(defcustom opencode-use-fast-event-stream t
+  "Use OpenCode-specific SSE parsing for the live event stream.
+This avoids `plz-event-source' buffer insertion/deletion overhead and allows
+client-side redaction before JSON decoding."
+  :type 'boolean
+  :group 'opencode)
+
 (defvar opencode--process nil
   "Opencode server process when started by Emacs.")
+
+(defvar-local opencode--sse-pending ""
+  "Unprocessed SSE data for the current OpenCode event process.")
+
+(defvar-local opencode--sse-open-logged nil
+  "Non-nil after logging the open event for this SSE process.")
+
+(defclass opencode--event-stream (plz-media-type:application/octet-stream)
+  ((coding-system :initform 'utf-8)
+   (type :initform 'text)
+   (subtype :initform 'event-stream)
+   (directory :initarg :directory
+              :documentation "OpenCode project directory for this stream."))
+  "Fast media type for OpenCode server-sent events.")
 
 ;; so invisible prompt "> " doesn't make whole prompt invisible
 (add-to-list 'comint--prompt-rear-nonsticky 'invisible)
@@ -193,19 +214,15 @@ if `opencode-auto-start-server' is non-nil."
   (when opencode--event-subscriptions
     (user-error "Already connected"))
   (setq opencode-api-url (format "http://%s:%d" host port))
-  (setq opencode-slash-commands opencode-builtin-slash-commands)
   (opencode--fetch-agents)
   (opencode-api-commands commands
-    (setq opencode-server-slash-commands commands
-          opencode-slash-commands
-          (append opencode-builtin-slash-commands commands)))
+    (setq opencode-slash-commands commands))
   (opencode-api-configured-providers result
     (setq opencode-providers (alist-get 'providers result)))
   (message "Connected to %s" opencode-api-url))
 
 (defun opencode-open-project (directory)
   "Open sessions control buffer for DIRECTORY."
-  (setq directory (file-name-as-directory directory))
   (opencode-process-events directory)
   (let ((buffer-name (format "*OpenCode Sessions in %s*" directory)))
     (unless (get-buffer buffer-name)
@@ -268,65 +285,105 @@ Or nil to disable logging.")
        (insert (format "[%s] %s: %s\n"
                        (format-time-string "%Y-%m-%d %H:%M:%S")
                        type
-                       event))
-       (opencode--truncate-at-max-lines opencode-event-log-max-lines)))))
+                        event))
+        (opencode--truncate-at-max-lines opencode-event-log-max-lines)))))
 
-(defun opencode--toast-show (properties)
-  "Show toast notification with PROPERTIES from opencode."
-  (funcall opencode-toast-function properties))
+(defun opencode--ignored-message-data-p (data)
+  "Return non-nil if raw event DATA can be ignored before JSON decoding."
+  (and (stringp data)
+       (string-match-p
+        (rx "\"type\":"
+            (or "\"file.watcher.updated\""
+                "\"server.heartbeat\""
+                "\"session.diff\""))
+        data)))
 
-(defun opencode--default-toast-show (properties)
-  "Default notifier to show notification with PROPERTIES from opencode."
-  (let-alist properties
-    (cond
-     ((featurep 'dbusbind)
-      (notifications-notify
-       :title .title
-       :body .message
-       :urgency (pcase .variant
-                  ((or "error" "warning" )'critical)
-                  ((or "info" "success") 'normal))
-       :timeout .duration
-       :replaces-id 5647
-       :app-icon 'none))
-     ((eq system-type 'darwin)
-      (let ((title (concat (pcase .variant
-                             ("error" "❌")
-                             ("warning" "⚠️")
-                             ((or "info" "success") "ℹ️"))
-                           " " .title)))
-        (if (executable-find "terminal-notifier")
-            (start-process "opencode-notification" nil "terminal-notifier"
-                           "-title" title
-                           "-message" .message
-                           "-group" "opencode-toast"
-                           "-activate" "org.gnu.Emacs"
-                           "-sound" (pcase .variant
-                                      ((or "error" "warning") "Basso")
-                                      (_ "default")))
-          (start-process "opencode-notification" nil "osascript" "-e"
-                         (format "display notification %S with title %S"
-                                 .message
-                                 title))))))))
+(defun opencode--redactable-tool-output-data-p (data)
+  "Return non-nil when DATA is a completed hidden tool update."
+  (and opencode-redact-hidden-tool-output
+       (stringp data)
+       (not opencode-show-tool-output)
+       (string-match-p "\"type\":\"message\\.part\\.updated\"" data)
+       (string-match-p "\"type\":\"tool\"" data)
+       (string-match-p "\"status\":\"completed\"" data)
+       ;; Preserve user-run shell command output, which the UI displays even
+       ;; when generic tool output is hidden.
+       (not (string-match-p "\"tool\":\"bash\"" data))))
 
-(defun opencode--buffer-active-p (buffer)
-  "Return non-nil if BUFFER is visible in the selected window of a focused frame."
-  (and buffer
-       (eq buffer (window-buffer (selected-window)))
-       (frame-focus-state (window-frame (selected-window)))))
+(defun opencode--redact-tool-output-data (data)
+  "Return DATA with completed hidden tool output replaced by a placeholder."
+  (if (opencode--redactable-tool-output-data-p data)
+      (replace-regexp-in-string
+       (rx "\"output\":\""
+           (* (or (seq "\\" anything)
+                  (not (any "\\\""))))
+           "\"")
+       (concat "\"output\":"
+               (json-encode-string opencode-redacted-tool-output-placeholder))
+       data t t)
+    data))
 
-(defun opencode--output-questions (buffer questions)
-  "Output QUESTIONS to BUFFER with ❓ prefix for each question."
-  (when (and (buffer-live-p buffer)
-             (get-buffer-process buffer))
-    (with-current-buffer buffer
-      (opencode--maybe-insert-block-spacing)
-      (opencode--output (opencode--format-questions questions))
-      (opencode--output "\n"))))
+(defun opencode--sse-line-value (line field)
+  "Return the SSE value in LINE for FIELD, or nil."
+  (let ((prefix (concat field ":")))
+    (when (string-prefix-p prefix line)
+      (let ((value (substring line (length prefix))))
+        (if (string-prefix-p " " value)
+            (substring value 1)
+          value)))))
 
-(defun opencode--window-selection-change-hook (_frame)
+(defun opencode--sse-dispatch-frame (frame directory)
+  "Dispatch one SSE FRAME for DIRECTORY."
+  (let (event-type data-lines)
+    (dolist (line (split-string frame (rx (or "\r\n" "\n" "\r"))))
+      (cond
+       ((string-prefix-p ":" line))
+       ((setq event-type (or (opencode--sse-line-value line "event")
+                             event-type)))
+       ((when-let ((data (opencode--sse-line-value line "data")))
+          (push data data-lines)))))
+    (when data-lines
+      (let ((data (mapconcat #'identity (nreverse data-lines) "\n")))
+        (when (and (not (string-empty-p data))
+                   (or (null event-type) (string= event-type "message")))
+          (let ((default-directory directory))
+            (opencode--handle-message-data data)))))))
+
+(defun opencode--sse-process-chunk (chunk directory)
+  "Process SSE CHUNK for DIRECTORY without using an Emacs stream buffer."
+  (setq opencode--sse-pending (concat opencode--sse-pending chunk))
+  (while (string-match (rx (or "\r\n\r\n" "\n\n" "\r\r"))
+                       opencode--sse-pending)
+    (let ((frame (substring opencode--sse-pending 0 (match-beginning 0)))
+          (next (match-end 0)))
+      (setq opencode--sse-pending (substring opencode--sse-pending next))
+      (unless (string-empty-p frame)
+        (opencode--sse-dispatch-frame frame directory)))))
+
+(cl-defmethod plz-media-type-process ((media-type opencode--event-stream) process chunk)
+  "Process OpenCode SSE CHUNK using MEDIA-TYPE for PROCESS."
+  (with-current-buffer (process-buffer process)
+    (unless opencode--sse-open-logged
+      (setq opencode--sse-open-logged t)
+      (opencode--log-event "OPEN" nil))
+    (when-let ((body (plz-response-body chunk)))
+      (when (stringp body)
+        (opencode--sse-process-chunk
+         (plz-media-type-decode-coding-string media-type body)
+         (oref media-type directory))))))
+
+(cl-defmethod plz-media-type-then ((_media-type opencode--event-stream) response)
+  "Finalize OpenCode event stream RESPONSE without parsing a buffered body."
+  (setf (plz-response-body response) nil)
+  response)
+
+(cl-defmethod plz-media-type-else ((_media-type opencode--event-stream) error)
+  "Return OpenCode event stream ERROR without parsing a buffered body."
+  error)
+
+(defun opencode--selection-change-hook (&optional _frame)
   "Hook to remove session from the alerted sessions list when it's visited.
-Also prompts for pending questions if any."
+Also prompts for pending questions or permissions if any."
   (when opencode-session-id
     (setf opencode-alerted-sessions
           (cl-delete-if (lambda (session)
@@ -338,39 +395,26 @@ Also prompts for pending questions if any."
     (when opencode-session-pending-questions
       (let ((pending opencode-session-pending-questions))
         (setq opencode-session-pending-questions nil)
-        (opencode--prompt-questions (car pending) (cdr pending))))))
+        (opencode--prompt-questions (car pending) (cdr pending))))
+    ;; Handle pending permissions when buffer becomes active
+    (when opencode-session-pending-permission
+      (run-at-time 0 nil #'opencode-respond-permission))))
 
-(add-hook 'window-selection-change-functions 'opencode--window-selection-change-hook)
+(add-hook 'window-selection-change-functions 'opencode--selection-change-hook)
 
-(defun opencode--prompt-questions (question-id questions)
-  "Prompt user to answer QUESTIONS, then reply or reject to QUESTION-ID.
-QUESTIONS is a vector of question objects with `question', `header',
-`options', and `multiple' fields.  Each option has `label' and
-`description' fields.  Displays a transient popup for each question.
-On confirm, replies to the server.  On reject or dismiss, rejects."
-  (opencode-question--prompt question-id questions))
+;; Handles the case where the session buffer was already selected when the
+;; request arrived but Emacs did not have OS focus at the time.
+(add-function :after after-focus-change-function #'opencode--selection-change-hook)
 
-(defun opencode--permission-request (permission-id session-id type title)
-  "Respond to permission request from opencode.
-Args are PERMISSION-ID, SESSION-ID, and the TYPE and TITLE of the request."
-  (opencode-api-respond-permission-request (session-id permission-id)
-      `((response . ,(x-popup-dialog
-                      t
-                      `(,(format "OpenCode Permission Request\n%s: %s"
-                                 type title)
-                        ("Accept" . "once")
-                        ("Accept Always" . "always")
-                        ("Deny" . "reject")))))
-      response
-    (unless response
-      (user-error "Response to permission request failed"))))
-
-(defun opencode--handle-message (event)
-  "Handle a message EVENT from opencode server."
-  (let* ((data (json-read-from-string (plz-event-source-event-data event)))
-         (msg-type (intern (alist-get 'type data)))
-         (properties (alist-get 'properties data)))
-    (unless (memq msg-type '(file.watcher.updated server.heartbeat session.diff))
+(defun opencode--handle-message-data (raw-data)
+  "Handle raw message RAW-DATA from opencode server."
+  (when (and (stringp raw-data)
+             (not (string-empty-p raw-data))
+             (not (opencode--ignored-message-data-p raw-data)))
+    (let* ((data (json-read-from-string
+                  (opencode--redact-tool-output-data raw-data)))
+          (msg-type (intern (alist-get 'type data)))
+          (properties (alist-get 'properties data)))
       (opencode--log-event "MESSAGE" data)
       (let-alist properties
         (cl-case msg-type
@@ -386,10 +430,20 @@ Args are PERMISSION-ID, SESSION-ID, and the TYPE and TITLE of the request."
                                      (alist-get 'parentID session))
                               (opencode--toast-show `((title . "OpenCode Finished")
                                                       (message . ,(alist-get 'title session))
-                                                      (variant . "success")
-                                                      (timeout . 1000)))
+                                                      (variant . "success")))
                               (push session opencode-alerted-sessions)))))
-          (session.status (opencode-session--set-status .sessionID .status.type))
+          (session.status (pcase .status.type
+                            ((or "busy" "idle")
+                             (opencode-session--set-status .sessionID .status.type))
+                            ("retry"
+                             (opencode-api-session (.sessionID)
+                                 session
+                               (opencode--toast-show `((title . ,(concat "OpenCode: "
+                                                                  (alist-get 'title session)))
+                                                       (message . ,(format "%s\n\nRetry #%d"
+                                                                    .status.message
+                                                                    .status.attempt))
+                                                       (variant . "warning")))))))
           ((session.created session.updated session.deleted)
            (dolist (buffer (map-elt opencode--session-control-buffers .info.projectID))
              (when (buffer-live-p buffer)
@@ -405,29 +459,19 @@ Args are PERMISSION-ID, SESSION-ID, and the TYPE and TITLE of the request."
           (message.part.delta (opencode-session--update-part properties .delta
                                                              (gethash .partID opencode-part-type)))
           (message.updated (opencode-session--message-updated .info))
-          (permission.updated (opencode--permission-request .id .sessionID .type .title))
-          (question.asked
-           (let ((buffer (gethash .sessionID opencode-session-buffers)))
-             ;; Output questions to the buffer
-             (opencode--output-questions buffer .questions)
-             (if (opencode--buffer-active-p buffer)
-                 ;; Buffer is active, prompt immediately
-                 (opencode--prompt-questions .id .questions)
-               ;; Buffer not active, show notification and store pending
-               (opencode--toast-show `((title . "OpenCode Questions")
-                                       (message . ,(alist-get
-                                                    'question
-                                                    (aref .questions 0)))
-                                       (variant . "info")
-                                       (timeout . 1000)))
-               (opencode-api-session (.sessionID)
-                   session
-                 (push session opencode-alerted-sessions))
-               (when buffer
-                 (with-current-buffer buffer
-                   (setq opencode-session-pending-questions
-                         (cons .id .questions)))))))
+          (permission.asked
+           (opencode--permission-request
+            .id .sessionID .permission
+            .metadata
+            (seq-into .patterns 'list)
+            (seq-into .always 'list)))
+           (question.asked
+            (opencode--question-request .id .sessionID .questions))
           (otherwise (opencode--log-event "WARNING" "unhandled message type")))))))
+
+(defun opencode--handle-message (event)
+  "Handle a message EVENT from opencode server."
+  (opencode--handle-message-data (plz-event-source-event-data event)))
 
 (defun opencode-disconnect (&optional event)
   "Disconnect from opencode server, optionally log EVENT."
@@ -438,7 +482,7 @@ Args are PERMISSION-ID, SESSION-ID, and the TYPE and TITLE of the request."
            do (kill-process process))
   (when (process-live-p opencode--process)
     (set-process-sentinel opencode--process nil)
-     (kill-process opencode--process))
+    (kill-process opencode--process))
   (setq opencode--event-subscriptions nil))
 
 (defun opencode--disconnect-process (process &optional event)
@@ -465,7 +509,6 @@ Without it will use a default title and then automatically generate one."
   (interactive
    (list (when current-prefix-arg
            (read-string "Title: "))))
-  (setq default-directory (expand-file-name default-directory))
   (opencode-autoconnect
    (lambda ()
      (opencode-process-events default-directory)
@@ -508,7 +551,7 @@ If point is before the first prompt, creates a new session instead."
         (opencode-api-fork-session (opencode-session-id)
             `((messageID . ,message-id))
             session
-          (opencode-open-session session :pop-to-buffer nil))
+          (opencode-open-session-same-window session))
       ;; if before the first prompt just open a new session
       (opencode-new-session))))
 
@@ -527,6 +570,24 @@ If point is before the first prompt, creates a new session instead."
                "Reverted edits after message"
              "Failed to revert message")))
       (user-error "No user message at point"))))
+
+(defun opencode-delete-message ()
+  "Delete the message at point from the current session."
+  (interactive)
+  (unless opencode-session-id
+    (user-error "Not in an opencode session buffer"))
+  (opencode--current-message-exchange (user-id assistant-id)
+    (if (and user-id assistant-id)
+        (opencode-api-delete-message (opencode-session-id assistant-id)
+            assistant-result
+          (unless assistant-result
+            (error "Failed to delete assistant message"))
+          (opencode-api-delete-message (opencode-session-id user-id)
+              user-result
+            (unless user-result
+              (error "Failed to delete user message"))
+            (opencode--delete-message-at-point)))
+      (user-error "No message with assistant response at point"))))
 
 (defun opencode-unrevert-all ()
   "Unrevert all reverted messages in the current session."
@@ -552,33 +613,36 @@ If point is before the first prompt, creates a new session instead."
       (when existing
         (setcdr (car existing) directory)
         (dolist (entry (cdr existing))
-          (when (process-live-p (car entry))
-            (kill-process (car entry)))
+          (opencode--disconnect-process (car entry))
           (setq opencode--event-subscriptions
                 (delq entry opencode--event-subscriptions))))
-       (unless existing
-         (let (process)
-           (setq process
-                 (plz-media-type-request
-                  'get (concat opencode-api-url "/event")
-                  :as `(media-types
+      (unless existing
+        (let (process
+              (event-stream
+               (if opencode-use-fast-event-stream
+                   (opencode--event-stream :directory directory)
+                 (plz-event-source:text/event-stream
+                  :events `((open . ,(lambda (event)
+                                       (opencode--log-event "OPEN" event)))
+                            (message . ,(lambda (event)
+                                          (let ((default-directory directory))
+                                            (opencode--handle-message event))))
+                            (close . ,(lambda (event)
+                                        (opencode--disconnect-process process event))))))))
+          (setq process
+                (plz-media-type-request
+                 'get (concat opencode-api-url "/event")
+                 :as `(media-types
                         ((text/event-stream
-                          . ,(plz-event-source:text/event-stream
-                              :events `((open . ,(lambda (event)
-                                                   (opencode--log-event "OPEN" event)))
-                                        (message . ,(lambda (event)
-                                                      (let ((default-directory directory))
-                                                        (opencode--handle-message event))))
-                                        (close . ,(lambda (event)
-                                                    (opencode--disconnect-process process event))))))))
-                  :headers `(("x-opencode-directory" . ,directory)
-                             ,(opencode--auth-header))
-                  :then (lambda (&rest _)
-                          (opencode--disconnect-process process))
-                  :else (lambda (response)
-                          (opencode--disconnect-process process response))))
-           (set-process-query-on-exit-flag process nil)
-           (push (cons process directory) opencode--event-subscriptions))))))
+                          . ,event-stream)))
+                 :headers `(("x-opencode-directory" . ,directory)
+                            ,(opencode--auth-header))
+                 :then (lambda (&rest _)
+                         (opencode--disconnect-process process))
+                 :else (lambda (response)
+                         (opencode--disconnect-process process response))))
+          (set-process-query-on-exit-flag process nil)
+          (push (cons process directory) opencode--event-subscriptions))))))
 
 (provide 'opencode)
 ;;; opencode.el ends here
