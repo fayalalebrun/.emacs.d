@@ -505,12 +505,14 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
 (defun agent-board--live-server-buffer-p (buf sessions)
   "Return non-nil when BUF belongs to one of SESSIONS.
 
-When SESSIONS is nil, treat BUF as unknown rather than live so stale buffers do
-not mask a server restart." 
+When SESSIONS is nil, trust a live local OpenCode buffer.  Session data is
+loaded asynchronously, and treating unknown membership as dead makes visible
+buffers flicker to no-agent while the cache is empty or refreshing."
   (and buf
        (buffer-live-p buf)
-       (member (agent-board--buffer-session-id buf)
-               (agent-board--session-ids sessions))))
+       (or (null sessions)
+           (member (agent-board--buffer-session-id buf)
+                   (agent-board--session-ids sessions)))))
 
 (defun agent-board--filter-sessions-for-directory (sessions dir)
   "Return SESSIONS whose directory matches DIR."
@@ -689,6 +691,36 @@ not mask a server restart."
   "Track OpenCode activity after message update INFO."
   (when-let ((buffer (gethash (alist-get 'sessionID info) opencode-session-buffers)))
     (agent-board--mark-session-activity buffer)))
+
+(defun agent-board--invalidate-opencode-status-cache-for-buffer (buffer)
+  "Invalidate cached OpenCode status data for BUFFER's worktree."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (boundp 'default-directory)
+                 default-directory
+                 (file-directory-p default-directory))
+        (let ((key (file-name-as-directory (file-truename default-directory))))
+          (remhash key agent-board--status-cache))))))
+
+(defun agent-board--after-opencode-status-changed (session-id _status)
+  "Refresh visible boards after OpenCode SESSION-ID changes status."
+  (when-let ((buffer (gethash session-id opencode-session-buffers)))
+    (agent-board--mark-session-activity buffer)
+    (agent-board--invalidate-opencode-status-cache-for-buffer buffer)
+    (agent-board--schedule-redraw)))
+
+(defun agent-board--after-opencode-message-data (raw-data)
+  "Invalidate board caches for session lifecycle events in RAW-DATA."
+  (when (and (stringp raw-data)
+             (string-match-p
+              (rx "\"type\":"
+                  (or "\"session.created\""
+                      "\"session.updated\""
+                      "\"session.deleted\""))
+              raw-data))
+    (clrhash agent-board--session-cache)
+    (clrhash agent-board--status-cache)
+    (agent-board--schedule-redraw)))
 
 (defun agent-board--after-opencode-update-part (&rest _)
   "Track OpenCode activity in the current session buffer."
@@ -1074,9 +1106,19 @@ not mask a server restart."
     (advice-add 'opencode-session--message-updated :after
                 #'agent-board--after-opencode-message-updated))
   (unless (advice-member-p #'agent-board--after-opencode-update-part
-                           #'opencode-session--update-part)
+                            #'opencode-session--update-part)
     (advice-add 'opencode-session--update-part :after
-                #'agent-board--after-opencode-update-part)))
+                #'agent-board--after-opencode-update-part))
+  (unless (advice-member-p #'agent-board--after-opencode-status-changed
+                           #'opencode-session--set-status)
+    (advice-add 'opencode-session--set-status :after
+                #'agent-board--after-opencode-status-changed)))
+
+(with-eval-after-load 'opencode
+  (unless (advice-member-p #'agent-board--after-opencode-message-data
+                           #'opencode--handle-message-data)
+    (advice-add 'opencode--handle-message-data :after
+                #'agent-board--after-opencode-message-data)))
 
 (defun agent-board--refresh-timer-callback (board-buf)
   "Refresh BOARD-BUF if it is alive and visible."
