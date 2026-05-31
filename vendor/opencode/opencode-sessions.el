@@ -72,6 +72,14 @@
     "/" 'opencode-insert-slash-command
     "@" 'opencode-add-subagent))
 
+(defun opencode--format-file-line-reference (file line session-directory)
+  "Return a backticked FILE:LINE reference for SESSION-DIRECTORY."
+  (let ((display-file (if (and session-directory
+                               (file-in-directory-p file session-directory))
+                          (file-relative-name file session-directory)
+                        file)))
+    (format "`%s:%d`" display-file line)))
+
 (with-eval-after-load 'evil
   (declare-function evil-define-key* "evil-core")
   (evil-define-key* 'normal opencode-session-control-mode-map
@@ -575,8 +583,22 @@ Otherwise prompt for file in current project."
           (format "region: %s"
                   (truncate-string-to-width region 24 0 nil (truncate-string-ellipsis)))
           'region-id region-id)
-         (insert " ")))
+          (insert " ")))
     (user-error "No active region")))
+
+(defun opencode-insert-line-reference ()
+  "Insert a backticked file:line reference into the last OpenCode session.
+Uses the current buffer's file and line number at point.  This inserts the
+same `file:line' form that OpenCode chat already recognizes and buttonizes."
+  (interactive)
+  (unless buffer-file-name
+    (user-error "Current buffer is not visiting a file"))
+  (let ((file buffer-file-name)
+        (line (line-number-at-pos)))
+    (with-last-opencode-session
+     (insert (opencode--format-file-line-reference
+              file line default-directory)
+             " "))))
 
 (defun opencode-add-subagent ()
   "Insert a subagent mention into the current input."

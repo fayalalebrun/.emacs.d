@@ -182,10 +182,12 @@ If a session buffer and frame is not active, emacs will show a notification when
 * Commands
 #+begin_src emacs-lisp :results table :colnames '("Command" "Description") :exports results
 (cl-loop for command in '(opencode opencode-connect opencode-disconnect
-                          opencode-select-project opencode-select-open-session
-                          opencode-new-worktree opencode-new-session
-                          opencode-select-idle opencode-visit-last-idle
-                          opencode-add-file-dwim opencode-add-region opencode-add-buffer-dwim)
+                           opencode-select-project opencode-select-open-session
+                           opencode-new-worktree opencode-new-session
+                           opencode-select-idle opencode-visit-last-idle
+                           opencode-add-file-dwim opencode-add-region
+                           opencode-add-buffer-dwim
+                           opencode-insert-line-reference)
          collect (list command
                        (string-join (string-lines (documentation command)) " ")))
 #+end_src
