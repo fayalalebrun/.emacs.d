@@ -1,5 +1,6 @@
 Vendored from https://codeberg.org/sczi/opencode.el.git
-Upstream commit: f78c9097c680d9e77c88c9d913f42b52d7bcc320
+Upstream commit: 8b4649f5454b9cfedcc750177099d1f97a7703b7
 
 Local changes:
-- avoid recursive SSE disconnect handling when multiple event subscriptions are active
+- none currently; the old recursive SSE disconnect workaround is obsolete in
+  upstream now that it uses a single global event subscription

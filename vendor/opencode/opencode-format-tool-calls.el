@@ -5,19 +5,6 @@
 ;; Author: Scott Zimmermann <sczi@disroot.org>
 ;; Keywords: internal
 
-;; This program is free software; you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 ;;; Commentary:
 
 ;; Code for managing formatting opencode tool calls for display
@@ -28,60 +15,103 @@
 (require 'diff-mode)
 (require 'opencode-common)
 
+(defcustom opencode-tool-formatters nil
+  "Alist mapping opencode tool names to formatter functions.
+
+Each element has the form (TOOL-NAME . FUNCTION), where TOOL-NAME
+is a string naming the tool and FUNCTION is called with the tool
+arguments and should return a string.
+
+`opencode-define-tool-formatter' can be used to register one"
+  :type '(alist :key-type string :value-type function)
+  :group 'opencode)
+
+(defmacro opencode-define-tool-formatter (tool-name &rest body)
+  "Register a formatter for TOOL-NAME.
+
+BODY is evaluated inside `(let-alist tool-args ...)'."
+  (declare (indent 2)
+           (debug (form symbolp body)))
+  (cl-with-gensyms (input-var)
+    `(setf (alist-get ,tool-name opencode-tool-formatters nil nil #'equal)
+           (lambda (,input-var)
+             (let-alist ,input-var
+               ,@body)))))
+
+(opencode-define-tool-formatter "edit"
+    (concat "edit " .filePath ":\n"
+            (opencode--format-edit-diff .oldString .newString)))
+
+(opencode-define-tool-formatter "apply_patch"
+    (concat "apply_patch:\n"
+            (opencode--format-apply-patch .patchText)))
+
+(opencode-define-tool-formatter "write"
+    (format "write %s" .filePath))
+
+(opencode-define-tool-formatter "read"
+    (if (and .offset .limit)
+        (format "read %s [offset=%d, limit=%d]"
+                .filePath .offset .limit)
+      (format "read %s" .filePath)))
+
+(opencode-define-tool-formatter "grep"
+    (concat
+     (format "grep \"%s\"" .pattern)
+     (when (or .include .path)
+       (format " in %s" (or .include .path)))))
+
+(opencode-define-tool-formatter "bash"
+    (concat (when .description
+              (format "# %s\n" .description))
+            (format "$ %s" .command)))
+
+(opencode-define-tool-formatter "websearch"
+    (format "websearch \"%s\"" .query))
+
+(opencode-define-tool-formatter "call_omo_agent"
+    (format "call_omo_agent: %s\n\n%s" .description .prompt))
+
+(opencode-define-tool-formatter "glob"
+    (if .path
+        (format "glob \"%s\" in %s"
+                .pattern
+                (opencode--relative-path-for-display .path))
+      (format "glob \"%s\"" .pattern)))
+
+(opencode-define-tool-formatter "todowrite"
+    (opencode--render-todos .todos))
+
+(opencode-define-tool-formatter "question"
+    (opencode--format-questions .questions))
+
+(opencode-define-tool-formatter "task"
+    (if (string= "explore" .subagent_type)
+        (format "🔍 Explore: %s" .description)
+      (format "🤖 Subagent Task: %s" .description)))
+
 (defun opencode--format-tool-call (tool input)
   "Format TOOL call with INPUT arguments for display."
-  (let-alist input
-    (when .filePath
-      (setf .filePath (opencode--relative-path-for-display .filePath)))
-    (pcase tool
-      ("edit"
-       (concat "edit " .filePath ":\n"
-               (opencode--format-edit-diff .oldString .newString)
-               "\n"))
-      ("apply_patch"
-       (concat "apply_patch:\n"
-               (opencode--format-apply-patch .patchText)
-               "\n"))
-      ("read"
-       (if (and .offset .limit)
-           (format "read %s [offset=%d, limit=%d]\n\n"
-                   .filePath .offset .limit)
-         (format "read %s\n\n" .filePath)))
-      ("grep"
-       (concat
-        (format "grep \"%s\"" .pattern)
-        (when (or .include .path)
-          (format " in %s" (or .include .path)))
-        "\n\n"))
-      ("bash"
-       (concat (when .description
-                 (format "# %s\n" .description))
-               (format "$ %s\n\n" .command)))
-      ("websearch"
-       (format "websearch \"%s\"\n\n" .query))
-      ("call_omo_agent"
-       (format "call_omo_agent: %s\n\n%s\n\n" .description .prompt))
-      ("glob"
-       (if .path
-           (format "glob \"%s\" in %s\n\n"
-                   .pattern
-                   (opencode--relative-path-for-display .path))
-         (format "glob \"%s\"\n\n" .pattern)))
-      ("todowrite"
-       (concat (opencode--render-todos .todos) "\n\n"))
-      ("question"
-       (concat (opencode--format-questions (alist-get 'questions input)) "\n\n"))
-      ((and "task" (guard (string= "explore" .subagent_type)))
-       (format "🔍 Explore: %s\n\n" .description))
-      (_ (if (= 1 (length input))
-             (format "%s %s\n\n" tool (cdar input))
-           ;; Multiple arguments: tool-name, then arg-name: value per line
-           (concat tool " ["
-                   (mapconcat (lambda (pair)
-                                (format "%s=%s" (car pair) (cdr pair)))
-                              input
-                              ", ")
-                   "]\n\n"))))))
+  (when (alist-get 'filePath input)
+    (setf (alist-get 'filePath input) (opencode--relative-path-for-display (alist-get 'filePath input))))
+
+  (if-let (tool-formatter (cdr (assoc-string tool opencode-tool-formatters)))
+      (funcall tool-formatter input)
+    (if (= 1 (length input))
+        (let ((arg (cdar input)))
+          (format "%s%s%s"
+                  tool
+                  (if (string-match-p "\n" arg)
+                      "\n"
+                    " ")
+                  arg))
+      ;; Multiple arguments: tool-name, then arg-name: value per line
+      (concat tool " ["
+              (mapconcat (lambda (pair)
+                           (format "%s=%s" (car pair) (cdr pair)))
+                         input
+                         ", ")
+              "]"))))
 
 (defun opencode--render-todos (todos)
   "Render TODOS as markdown todo list."
@@ -144,7 +174,7 @@
      (goto-char (point-min))
       (while (not (eobp))
         (cond
-        ((looking-at "\\*\\*\\* \\(Add File\\|Update File\\|Delete File\\): \\(.*\\)$")
+        ((looking-at opencode--apply-patch-file-header-regexp)
          (let ((beg (match-beginning 0))
                (end (match-end 0))
                (operation (match-string 1))

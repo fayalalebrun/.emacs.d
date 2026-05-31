@@ -5,19 +5,6 @@
 ;; Author: Scott Zimmermann <sczi@disroot.org>
 ;; Keywords: internal
 
-;; This program is free software; you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 ;;; Commentary:
 
 ;; Common code shared through the package
@@ -29,6 +16,7 @@
 (require 'map)
 (require 'markdown-mode)
 (require 'notifications)
+(require 'opencode-flycheck)
 (require 'project)
 (require 'savehist)
 
@@ -40,8 +28,8 @@
 (defvar opencode-agents nil
   "List of available agents excluding hidden agents.")
 
-(defvar opencode-slash-commands nil
-  "List of available slash commands.")
+(defvar opencode--slash-commands-by-directory nil
+  "Alist mapping normalized project directories to available slash commands.")
 
 (defvar opencode-alerted-sessions nil
   "List of unvisited idle sessions.")
@@ -58,11 +46,15 @@
 (defvar-local opencode--extra-parts nil
   "An list containing extra parts to send with the next input.")
 
-(defvar opencode--event-subscriptions nil
-  "An alist mapping: SSE event process to it's directory.")
+(defvar opencode--event-subscription nil
+  "SSE event process for the global event stream.")
 
 (defvar opencode--session-control-buffers nil
   "An alist mapping of projectIDs to session control buffers for that project.")
+
+(defun opencode--normalize-directory (directory)
+  "Return DIRECTORY as a canonical directory name."
+  (file-name-as-directory (file-truename directory)))
 
 (defcustom opencode-toast-function 'opencode--default-toast-show
   "Function to use to show toast notifications.
@@ -86,18 +78,47 @@ for title, message, variant (error/warning/info/success), and duration"
   :type 'boolean
   :group 'opencode)
 
-(defcustom opencode-redact-hidden-tool-output t
-  "Redact completed tool output from live events when it is hidden.
-This only affects the Emacs client-side copy of live SSE events.  It does
-not change what the opencode server stores or what the model sees."
-  :type 'boolean
+(defcustom opencode-file-edited-functions
+  '(opencode--fix-parens
+    opencode--reload-elisp-file)
+  "Hook run after opencode edits a file.
+This is an abnormal hook.  Each function receives two arguments, FILE and
+RANGES, after a completed write, edit, or apply_patch tool call.  FILE is the
+edited file path.  RANGES is a list of (START-LINE . END-LINE) cons cells in
+the post-edit file, or nil when the whole file was written.  For deletion-only
+edits, END-LINE is nil."
+  :type 'hook
   :group 'opencode)
 
-(defcustom opencode-redacted-tool-output-placeholder
-  "[tool output redacted by opencode.el]"
-  "Placeholder used for redacted hidden tool output."
-  :type 'string
+(defcustom opencode-files-finished-editing-functions
+  '(opencode--indent-files
+    opencode--flycheck-edited-files)
+  "Run hooks after opencode finishes editing files.
+This is an abnormal hook.  Each entry receives one argument, FILES,
+the list of file paths from a message summary diff.  Hooks that finish
+synchronously can just return.  Hooks that finish asynchronously must
+return `:opencode-async' and call `opencode-hook-finished' when done.
+While a hook is active, it may call `opencode-report-diagnostic' zero
+or more times to queue diagnostic messages; all queued diagnostics are
+sent to the session together after all hooks finish."
+  :type 'hook
   :group 'opencode)
+
+(defcustom opencode-project-files-finished-editing-functions
+  nil
+  "Like `opencode-files-finished-editing-functions', but per-project.
+Designed to be set in `.dir-locals.el'"
+  :local t
+  :type 'hook
+  :group 'opencode)
+
+(defconst opencode--apply-patch-file-header-regexp
+  "^\\*\\*\\* \\(Add File\\|Update File\\|Delete File\\): \\(.*\\)$"
+  "Regexp matching file operation headers in apply_patch input.")
+
+(defconst opencode--apply-patch-move-to-regexp
+  "^\\*\\*\\* Move to: \\(.*\\)$"
+  "Regexp matching move destination headers in apply_patch input.")
 
 (defun opencode--time-ago (opencode-object type)
   "Return .time.TYPE value from OPENCODE-OBJECT, as seconds ago.
@@ -118,6 +139,24 @@ Returns \"-\" if SECONDS is nil."
     ((nil :null 0) t)
     (t nil)))
 
+(defun opencode--apply-patch-edited-files (patch-text)
+  "Return files added or updated by PATCH-TEXT."
+  (when patch-text
+    (with-temp-buffer
+      (insert patch-text)
+      (goto-char (point-min))
+      (cl-loop while (re-search-forward opencode--apply-patch-file-header-regexp nil t)
+               for operation = (match-string 1)
+               for file = (match-string 2)
+               when (member operation '("Add File" "Update File"))
+               collect (opencode--resolve-file-reference
+                        (or (and (equal operation "Update File")
+                                 (save-excursion
+                                   (forward-line 1)
+                                   (when (looking-at opencode--apply-patch-move-to-regexp)
+                                     (match-string 1))))
+                            file))))))
+
 (defun opencode--truncate-at-max-lines (max-lines)
   "Delete the first half of the buffer if we've reached MAX-LINES."
   (when (> (line-number-at-pos) max-lines)
@@ -130,42 +169,44 @@ Returns \"-\" if SECONDS is nil."
 CANDIDATES is a list of lists, where the first element is the string to show,
 the second is the value to return, the third is the annotation to show, and
 the optional fourth element is a number to sort by."
-  (let* ((max-length (seq-max
-                      (mapcar (lambda (candidate)
-                                (length (car candidate)))
-                              candidates)))
-         (candidate-results (make-hash-table :test 'equal))
-         (has-sort-values nil)
-         (candidates (cl-loop for (name return-value maybe-annotation sort-value) in candidates
-                              for annotation = (or maybe-annotation "")
-                              for candidate = (concat name
-                                                      (propertize annotation 'invisible t))
-                              when sort-value do (setf has-sort-values t)
-                              do (puthash candidate return-value candidate-results)
-                              collect (propertize candidate
-                                                  'opencode-annotation
-                                                  (concat (make-string (+ 5 (- max-length
-                                                                               (length name)))
-                                                                       ?\s)
-                                                          annotation)
-                                                  'opencode-sort-value sort-value)))
-         (completion-extra-properties
-          `(:annotation-function
-            ,(lambda (candidate)
-               (get-text-property 0 'opencode-annotation candidate))
-            :display-sort-function
-            ,(when has-sort-values
-               (lambda (candidates)
-                 (sort candidates
-                       (lambda (a b)
-                         (< (get-text-property 0 'opencode-sort-value a)
-                            (get-text-property 0 'opencode-sort-value b)))))))))
-    (gethash
-     (completing-read
-      prompt
-      candidates
-      nil t)
-     candidate-results)))
+  (if candidates
+      (let* ((max-length (seq-max
+                          (mapcar (lambda (candidate)
+                                    (length (car candidate)))
+                                  candidates)))
+             (candidate-results (make-hash-table :test 'equal))
+             (has-sort-values nil)
+             (candidates (cl-loop for (name return-value maybe-annotation sort-value) in candidates
+                                  for annotation = (or maybe-annotation "")
+                                  for candidate = (concat name
+                                                          (propertize annotation 'invisible t))
+                                  when sort-value do (setf has-sort-values t)
+                                  do (puthash candidate return-value candidate-results)
+                                  collect (propertize candidate
+                                                      'opencode-annotation
+                                                      (concat (make-string (+ 5 (- max-length
+                                                                                   (length name)))
+                                                                           ?\s)
+                                                              annotation)
+                                                      'opencode-sort-value sort-value)))
+             (completion-extra-properties
+              `(:annotation-function
+                ,(lambda (candidate)
+                   (get-text-property 0 'opencode-annotation candidate))
+                :display-sort-function
+                ,(when has-sort-values
+                   (lambda (candidates)
+                     (sort candidates
+                           (lambda (a b)
+                             (< (get-text-property 0 'opencode-sort-value a)
+                                (get-text-property 0 'opencode-sort-value b)))))))))
+        (gethash
+         (completing-read
+          prompt
+          candidates
+          nil t)
+         candidate-results))
+    (message "%sNo completion candidates" prompt)))
 
 (defun opencode--format-questions (questions)
   "Format QUESTIONS showing ❓ prefix for each question."
@@ -211,15 +252,18 @@ the optional fourth element is a number to sort by."
     (recenter)))
 
 (defun opencode--buttonize-file-references (string)
-  "Return STRING with existing file references turned into buttons."
+  "Return STRING with backticked file references turned into buttons."
   (let ((start 0)
-        (regexp "\\(`?\\)\\([[:alnum:]._~/][[:alnum:]@%_./~+-]*\\):\\([0-9]+\\)\\1")
+        (regexp "`\\([[:alnum:]._~/][[:alnum:]@%_./~+-]*\\)\\(?::\\([0-9]+\\)\\)?`")
         parts)
     (while (string-match regexp string start)
       (let* ((match-beg (match-beginning 0))
              (match-end (match-end 0))
-             (file (match-string 2 string))
-             (line (string-to-number (match-string 3 string)))
+             (file (match-string 1 string))
+             (line-string (match-string 2 string))
+             (line (if line-string
+                       (string-to-number line-string)
+                     1))
              (path (opencode--resolve-file-reference file)))
         (push (substring string start match-beg) parts)
         (push (if path
@@ -229,7 +273,9 @@ the optional fourth element is a number to sort by."
                    'action #'opencode--visit-file-location
                    'button-data (cons path line)
                    'follow-link t
-                   'help-echo (format "Open %s:%d in another window" file line)
+                   'help-echo (if line-string
+                                  (format "Open %s:%d in another window" file line)
+                                (format "Open %s in another window" file))
                    'mouse-face 'highlight)
                 (substring string match-beg match-end))
               parts)
@@ -288,6 +334,49 @@ the optional fourth element is a number to sort by."
   (and buffer
        (eq buffer (window-buffer (selected-window)))
        (frame-focus-state (window-frame (selected-window)))))
+
+(defun opencode--reload-elisp-file (file &optional _ranges)
+  "Reload elisp FILE after LLM edits."
+  (when (string-suffix-p ".el" file)
+    (condition-case err
+        (load-file file)
+      (error
+       (message "Error reloading %s after LLM edit: %s" file err)))))
+
+(defvar flycheck-checkers)
+
+(defun opencode--fix-parens (file &optional _ranges)
+  "Use parinfer to fix parens in FILE after LLM edits."
+  (when (and (or (string-suffix-p ".el" file)
+                 (string-suffix-p ".lisp" file))
+             (require 'parinfer-rust-mode nil t))
+    (declare-function parinfer-rust--set-default-state "parinfer-rust-mode")
+    (declare-function parinfer-rust--execute "parinfer-rust-mode")
+    (defvar parinfer-rust--mode)
+    (with-current-buffer (find-file-noselect file)
+      (revert-buffer t t t)
+      (condition-case nil
+          (check-parens)
+        (error
+         (let ((flycheck-checkers (delq 'parinfer-rust
+                                        (and (boundp 'flycheck-checkers)
+                                             flycheck-checkers))))
+           (parinfer-rust--set-default-state)
+           (let ((parinfer-rust--mode "indent"))
+             (parinfer-rust--execute)))
+         (save-buffer))))))
+
+(defun opencode--indent-sensitive-buffer-p ()
+  "Return non-nil if the current buffer is indentation-sensitive."
+  (derived-mode-p '(python-base-mode
+                    haskell-mode
+                    haskell-ts-mode
+                    fsharp-mode
+                    fsharp-ts-mode
+                    yaml-mode
+                    yaml-ts-mode
+                    nim-mode
+                    nim-ts-mode)))
 
 (provide 'opencode-common)
 ;;; opencode-common.el ends here

@@ -1,4 +1,4 @@
-;;; opencode.el --- Emacs interface to opencode -*- lexical-binding: t; -*-
+;;; opencode.el --- Emacs interface to opencode -*- lexical-binding: t; byte-compile-warnings: (not docstrings-wide); -*-
 
 ;; Copyright (C) 2025  Scott Zimmermann
 
@@ -7,19 +7,6 @@
 ;; Package-Version: 0.0.1
 ;; Package-Requires: ((emacs "29.1") (magit "4.0") (markdown-mode "2.6") (plz "0.9") (plz-media-type "0.2.4") (plz-event-source "0.1.3"))
 ;; URL: https://codeberg.org/sczi/opencode.el/
-
-;; This program is free software; you can redistribute it and/or modify
-;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation, either version 3 of the License, or
-;; (at your option) any later version.
-
-;; This program is distributed in the hope that it will be useful,
-;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;; GNU General Public License for more details.
-
-;; You should have received a copy of the GNU General Public License
-;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -32,6 +19,7 @@
 (require 'magit)
 (require 'opencode-api)
 (require 'opencode-common)
+(require 'opencode-diff-parser)
 (require 'opencode-permission)
 (require 'opencode-question)
 (require 'opencode-sessions)
@@ -76,7 +64,7 @@ When nil, the command is constructed from `opencode-command',
 Set this to a custom command for special cases like nix:
   \"nix run github:numtide/nix-ai-tools#opencode -- serve --port 4096 --hostname localhost\""
   :type '(choice (const :tag "Construct from opencode-command" nil)
-                 (string :tag "Custom command"))
+          (string :tag "Custom command"))
   :group 'opencode)
 
 (defcustom opencode-auto-start-server t
@@ -85,29 +73,14 @@ When nil, `opencode' will only connect to an already running server."
   :type 'boolean
   :group 'opencode)
 
-(defcustom opencode-use-fast-event-stream t
-  "Use OpenCode-specific SSE parsing for the live event stream.
-This avoids `plz-event-source' buffer insertion/deletion overhead and allows
-client-side redaction before JSON decoding."
-  :type 'boolean
+(defcustom opencode-session-deleted-functions nil
+  "Hook run when an opencode session is deleted.
+This is an abnormal hook. Each function receives one argument, SESSION-ID."
+  :type 'hook
   :group 'opencode)
 
 (defvar opencode--process nil
   "Opencode server process when started by Emacs.")
-
-(defvar-local opencode--sse-pending ""
-  "Unprocessed SSE data for the current OpenCode event process.")
-
-(defvar-local opencode--sse-open-logged nil
-  "Non-nil after logging the open event for this SSE process.")
-
-(defclass opencode--event-stream (plz-media-type:application/octet-stream)
-  ((coding-system :initform 'utf-8)
-   (type :initform 'text)
-   (subtype :initform 'event-stream)
-   (directory :initarg :directory
-              :documentation "OpenCode project directory for this stream."))
-  "Fast media type for OpenCode server-sent events.")
 
 ;; so invisible prompt "> " doesn't make whole prompt invisible
 (add-to-list 'comint--prompt-rear-nonsticky 'invisible)
@@ -176,7 +149,7 @@ Only starts new one if `opencode-auto-start-server' is non-nil.
 Run ON-CONNECT after connected."
   (cond
    ;; Already connected
-   (opencode--event-subscriptions
+   (opencode--event-subscription
     (funcall on-connect))
    ;; We started a server process that's still alive
    ((process-live-p opencode--process)
@@ -211,19 +184,19 @@ if `opencode-auto-start-server' is non-nil."
   (interactive
    (list (read-string "Host: " opencode-host)
          (read-number "Port: " opencode-port)))
-  (when opencode--event-subscriptions
+  (when opencode--event-subscription
     (user-error "Already connected"))
   (setq opencode-api-url (format "http://%s:%d" host port))
+  (setq opencode--slash-commands-by-directory nil)
+  (opencode--subscribe-global-events)
   (opencode--fetch-agents)
-  (opencode-api-commands commands
-    (setq opencode-slash-commands commands))
   (opencode-api-configured-providers result
     (setq opencode-providers (alist-get 'providers result)))
   (message "Connected to %s" opencode-api-url))
 
 (defun opencode-open-project (directory)
   "Open sessions control buffer for DIRECTORY."
-  (opencode-process-events directory)
+  (opencode--download-slash-commands directory)
   (let ((buffer-name (format "*OpenCode Sessions in %s*" directory)))
     (unless (get-buffer buffer-name)
       (with-current-buffer (get-buffer-create buffer-name)
@@ -280,106 +253,227 @@ Or nil to disable logging.")
   "Log EVENT of TYPE to the opencode log buffer."
   (when opencode-event-log-max-lines
     (with-current-buffer (get-buffer-create "*opencode-event-log*")
-     (save-excursion
-       (goto-char (point-max))
-       (insert (format "[%s] %s: %s\n"
-                       (format-time-string "%Y-%m-%d %H:%M:%S")
-                       type
+      (save-excursion
+        (goto-char (point-max))
+        (insert (format "[%s] %s: %s\n"
+                        (format-time-string "%Y-%m-%d %H:%M:%S")
+                        type
                         event))
         (opencode--truncate-at-max-lines opencode-event-log-max-lines)))))
 
-(defun opencode--ignored-message-data-p (data)
-  "Return non-nil if raw event DATA can be ignored before JSON decoding."
-  (and (stringp data)
-       (string-match-p
-        (rx "\"type\":"
-            (or "\"file.watcher.updated\""
-                "\"server.heartbeat\""
-                "\"session.diff\""))
-        data)))
+(defun opencode--run-file-edited-hook (tool state)
+  "Run `opencode-file-edited-functions' for completed TOOL with STATE."
+  (let-alist state
+    (dolist (file-ranges (pcase tool
+                           ("write"
+                            (when .input.filePath
+                              (list (cons .input.filePath nil))))
+                           ((or "edit" "apply_patch")
+                            (unless .metadata.diff
+                              (error "Missing diff metadata for %s tool" tool))
+                            (opencode-diff->source-line-ranges .metadata.diff))))
+      (run-hook-with-args 'opencode-file-edited-functions
+                          (car file-ranges)
+                          (cdr file-ranges)))))
 
-(defun opencode--redactable-tool-output-data-p (data)
-  "Return non-nil when DATA is a completed hidden tool update."
-  (and opencode-redact-hidden-tool-output
-       (stringp data)
-       (not opencode-show-tool-output)
-       (string-match-p "\"type\":\"message\\.part\\.updated\"" data)
-       (string-match-p "\"type\":\"tool\"" data)
-       (string-match-p "\"status\":\"completed\"" data)
-       ;; Preserve user-run shell command output, which the UI displays even
-       ;; when generic tool output is hidden.
-       (not (string-match-p "\"tool\":\"bash\"" data))))
+(defvar opencode--files-finished-editing-current nil
+  "Current `opencode-files-finished-editing-functions' run context.")
 
-(defun opencode--redact-tool-output-data (data)
-  "Return DATA with completed hidden tool output replaced by a placeholder."
-  (if (opencode--redactable-tool-output-data-p data)
-      (replace-regexp-in-string
-       (rx "\"output\":\""
-           (* (or (seq "\\" anything)
-                  (not (any "\\\""))))
-           "\"")
-       (concat "\"output\":"
-               (json-encode-string opencode-redacted-tool-output-placeholder))
-       data t t)
-    data))
+(defvar opencode--files-finished-editing-queue nil
+  "Queued `opencode-files-finished-editing-functions' run contexts.")
 
-(defun opencode--sse-line-value (line field)
-  "Return the SSE value in LINE for FIELD, or nil."
-  (let ((prefix (concat field ":")))
-    (when (string-prefix-p prefix line)
-      (let ((value (substring line (length prefix))))
-        (if (string-prefix-p " " value)
-            (substring value 1)
-          value)))))
+(defun opencode-report-diagnostic (message)
+  "Queue diagnostic MESSAGE for the active finished-editing hook."
+  (unless opencode--files-finished-editing-current
+    (error "`opencode-report-diagnostic' called outside a finished-editing hook"))
+  (when (and message (not (string= message "")))
+    (push message
+          (plist-get opencode--files-finished-editing-current :diagnostics))))
 
-(defun opencode--sse-dispatch-frame (frame directory)
-  "Dispatch one SSE FRAME for DIRECTORY."
-  (let (event-type data-lines)
-    (dolist (line (split-string frame (rx (or "\r\n" "\n" "\r"))))
-      (cond
-       ((string-prefix-p ":" line))
-       ((setq event-type (or (opencode--sse-line-value line "event")
-                             event-type)))
-       ((when-let ((data (opencode--sse-line-value line "data")))
-          (push data data-lines)))))
-    (when data-lines
-      (let ((data (mapconcat #'identity (nreverse data-lines) "\n")))
-        (when (and (not (string-empty-p data))
-                   (or (null event-type) (string= event-type "message")))
-          (let ((default-directory directory))
-            (opencode--handle-message-data data)))))))
+(defun opencode-hook-finished ()
+  "Mark the active finished-editing hook as complete."
+  (let ((context opencode--files-finished-editing-current))
+    (unless context
+      (error "`opencode-hook-finished' called outside a finished-editing hook"))
+    (unless (plist-get context :active-hook)
+      (error "`opencode-hook-finished' called without an active hook"))
+    (plist-put context :active-hook nil)
+    (opencode--run-next-files-finished-editing-hook)))
 
-(defun opencode--sse-process-chunk (chunk directory)
-  "Process SSE CHUNK for DIRECTORY without using an Emacs stream buffer."
-  (setq opencode--sse-pending (concat opencode--sse-pending chunk))
-  (while (string-match (rx (or "\r\n\r\n" "\n\n" "\r\r"))
-                       opencode--sse-pending)
-    (let ((frame (substring opencode--sse-pending 0 (match-beginning 0)))
-          (next (match-end 0)))
-      (setq opencode--sse-pending (substring opencode--sse-pending next))
-      (unless (string-empty-p frame)
-        (opencode--sse-dispatch-frame frame directory)))))
+(defun opencode--files-finished-editing-diagnostic-message (diagnostics)
+  "Return a synthetic input message for DIAGNOSTICS."
+  (concat
+   "Diagnostics were reported after editing files. "
+   "Please fix any problems caused by your changes.\n\n"
+   (mapconcat #'identity diagnostics "\n\n")))
 
-(cl-defmethod plz-media-type-process ((media-type opencode--event-stream) process chunk)
-  "Process OpenCode SSE CHUNK using MEDIA-TYPE for PROCESS."
-  (with-current-buffer (process-buffer process)
-    (unless opencode--sse-open-logged
-      (setq opencode--sse-open-logged t)
-      (opencode--log-event "OPEN" nil))
-    (when-let ((body (plz-response-body chunk)))
-      (when (stringp body)
-        (opencode--sse-process-chunk
-         (plz-media-type-decode-coding-string media-type body)
-         (oref media-type directory))))))
+(defun opencode--maybe-start-files-finished-editing-hook ()
+  "Start the next queued finished-editing hook run if none is active."
+  (unless opencode--files-finished-editing-current
+    (when opencode--files-finished-editing-queue
+      (let ((context (pop opencode--files-finished-editing-queue)))
+        (setq opencode--files-finished-editing-current context)
+        (opencode--run-next-files-finished-editing-hook)))))
 
-(cl-defmethod plz-media-type-then ((_media-type opencode--event-stream) response)
-  "Finalize OpenCode event stream RESPONSE without parsing a buffered body."
-  (setf (plz-response-body response) nil)
-  response)
+(defun opencode--finish-files-finished-editing-hook-run (context)
+  "Finish finished-editing hook run CONTEXT and send queued diagnostics."
+  (let ((diagnostics (nreverse (plist-get context :diagnostics)))
+        (buffer (plist-get context :session-buffer)))
+    (setq opencode--files-finished-editing-current nil)
+    (when (and diagnostics (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (opencode-session--send-synthetic-input
+         (opencode--files-finished-editing-diagnostic-message diagnostics)))))
+  (opencode--maybe-start-files-finished-editing-hook))
 
-(cl-defmethod plz-media-type-else ((_media-type opencode--event-stream) error)
-  "Return OpenCode event stream ERROR without parsing a buffered body."
-  error)
+(defun opencode--run-next-files-finished-editing-hook ()
+  "Run the next hook in the active finished-editing context."
+  (let ((context opencode--files-finished-editing-current))
+    (unless context
+      (error "No active finished-editing hook context"))
+    (when-let ((buffer (plist-get context :session-buffer)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (if-let ((hook (car (plist-get context :hooks))))
+              (let (result errored)
+                (plist-put context :hooks (cdr (plist-get context :hooks)))
+                (plist-put context :active-hook hook)
+                (condition-case err
+                    (setq result (funcall hook (plist-get context :files)))
+                  (error
+                   (setq errored t)
+                   (opencode--log-event
+                    "WARNING FINISHED EDITING HOOK"
+                    (format "%S failed: %s" hook (error-message-string err)))
+                   (when (and (eq opencode--files-finished-editing-current context)
+                              (eq (plist-get context :active-hook) hook))
+                     (plist-put context :active-hook nil)
+                     (opencode--run-next-files-finished-editing-hook))))
+                (when (and (not errored)
+                           (not (eq result :opencode-async))
+                           (eq opencode--files-finished-editing-current context)
+                           (eq (plist-get context :active-hook) hook))
+                  (plist-put context :active-hook nil)
+                  (opencode--run-next-files-finished-editing-hook)))
+            (opencode--finish-files-finished-editing-hook-run context)))))))
+
+(defun opencode--maybe-run-file-edited-hook (part)
+  "Run `opencode-file-edited-functions' if PART completed a file edit."
+  (let-alist part
+    (when (and (equal .type "tool")
+               (equal .state.status "completed"))
+      (opencode--run-file-edited-hook .tool .state))))
+
+(defun opencode--message-summary-diff-files (info)
+  "Return file names from INFO summary diffs."
+  (when-let ((diffs (map-nested-elt info '(summary diffs))))
+    (delq nil
+          (mapcar (lambda (diff)
+                    (opencode--resolve-file-reference
+                     (alist-get 'file diff)))
+                  (seq-into diffs 'list)))))
+
+(defun opencode--record-files-edited-this-turn (info)
+  "Record INFO summary diff files for the session's current turn."
+  (let-alist info
+    (when (and .sessionID (map-nested-elt info '(summary diffs)))
+      (let ((buffer (gethash .sessionID opencode-session-buffers))
+            (files (opencode--message-summary-diff-files info)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (setq opencode--files-edited-this-turn files)))))))
+
+(defun opencode--maybe-run-files-finished-editing-hook (session-id)
+  "Run `opencode-files-finished-editing-functions' for SESSION-ID's pending files."
+  (when-let ((buffer (gethash session-id opencode-session-buffers)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when opencode--files-edited-this-turn
+          (let ((files opencode--files-edited-this-turn))
+            (setq opencode--files-edited-this-turn nil)
+            (when-let ((hooks (append opencode-files-finished-editing-functions
+                                      opencode-project-files-finished-editing-functions)))
+              (setq opencode--files-finished-editing-queue
+                    (append opencode--files-finished-editing-queue
+                            (list (list :session-buffer (current-buffer)
+                                        :files files
+                                        :hooks hooks
+                                        :diagnostics nil
+                                        :active-hook nil))))
+              (opencode--maybe-start-files-finished-editing-hook))))))))
+
+(defun opencode--indent-files (files)
+  "Indent FILES with Emacs."
+  (dolist (file files)
+    (with-current-buffer (find-file-noselect file)
+      (unless (opencode--indent-sensitive-buffer-p)
+        (let ((inhibit-message t))
+          (revert-buffer t t t)
+          (indent-region (point-min) (point-max)))
+        (when (buffer-modified-p)
+          (message "opencode indented %s" file)
+          (save-buffer))))))
+
+(defun opencode-run-command-diagnostic (command)
+  "Run COMMAND asynchronously and report diagnostics.
+For use within `opencode-files-finished-editing-functions' or
+`opencode-project-files-finished-editing-functions'."
+  (let* ((command-name (car command))
+         (buffer (generate-new-buffer (format "*%s*" command-name)))
+         (command-string (string-join command " ")))
+    (condition-case err
+        (progn
+          (make-process
+           :name command-name
+           :buffer buffer
+           :command command
+           :connection-type 'pipe
+           :noquery t
+           :sentinel
+           (lambda (process _event)
+             (when (memq (process-status process) '(exit signal))
+               (unwind-protect
+                   (unless (zerop (process-exit-status process))
+                     (let ((output (with-current-buffer (process-buffer process)
+                                     (string-trim (buffer-string)))))
+                       (opencode-report-diagnostic
+                        (if (equal output "")
+                            (format "`%s` failed" command-string)
+                          (format "`%s` failed:\n\n%s"
+                                  command-string
+                                  output)))))
+                 (kill-buffer buffer)
+                 (opencode-hook-finished)))))
+          :opencode-async)
+      (error
+       (kill-buffer buffer)
+       (opencode-report-diagnostic
+        (format "Failed to start `%s`: %s"
+                command-string
+                (error-message-string err)))
+       nil))))
+
+(defun opencode--emacs-ert-command ()
+  "Return the batch Emacs command used to test with ERT."
+  (append
+   (list (concat invocation-directory invocation-name) "--batch")
+   (cl-loop for path in (delete-dups (append (list default-directory) load-path nil))
+            when (and (stringp path) (file-directory-p path))
+            append (list "-L" (expand-file-name path)))
+   (cl-loop for file in (directory-files-recursively default-directory
+                                                     "\\(?:-test\\|-tests\\)\\.el\\'")
+            append (list "-l" file))
+   (list "-f" "ert-run-tests-batch-and-exit")))
+
+(defun opencode-uv-pytest (_files)
+  "Run pytest with uv and report diagnostics."
+  (opencode-run-command-diagnostic
+   '("uv" "run" "python3" "-m" "pytest")))
+
+(defun opencode-emacs-ert (_files)
+  "Run ERT and report diagnostics."
+  (opencode-run-command-diagnostic
+   (opencode--emacs-ert-command)))
 
 (defun opencode--selection-change-hook (&optional _frame)
   "Hook to remove session from the alerted sessions list when it's visited.
@@ -406,32 +500,31 @@ Also prompts for pending questions or permissions if any."
 ;; request arrived but Emacs did not have OS focus at the time.
 (add-function :after after-focus-change-function #'opencode--selection-change-hook)
 
-(defun opencode--handle-message-data (raw-data)
-  "Handle raw message RAW-DATA from opencode server."
-  (when (and (stringp raw-data)
-             (not (string-empty-p raw-data))
-             (not (opencode--ignored-message-data-p raw-data)))
-    (let* ((data (json-read-from-string
-                  (opencode--redact-tool-output-data raw-data)))
-          (msg-type (intern (alist-get 'type data)))
-          (properties (alist-get 'properties data)))
+(defun opencode--handle-message (data)
+  "Handle decoded message DATA from opencode server."
+  (let* ((msg-type (intern (alist-get 'type data)))
+         (properties (alist-get 'properties data)))
+    (unless (memq msg-type '(file.watcher.updated session.diff sync))
       (opencode--log-event "MESSAGE" data)
       (let-alist properties
         (cl-case msg-type
           (tui.toast.show (opencode--toast-show properties))
-          (session.idle (opencode-api-session (.sessionID)
-                            session
-                          (let ((buffer (gethash .sessionID opencode-session-buffers)))
-                            (with-current-buffer buffer
-                              (opencode--show-prompt))
-                            (unless (or
-                                     (opencode--buffer-active-p buffer)
-                                     ;; don't show alert for subagent sessions
-                                     (alist-get 'parentID session))
-                              (opencode--toast-show `((title . "OpenCode Finished")
-                                                      (message . ,(alist-get 'title session))
-                                                      (variant . "success")))
-                              (push session opencode-alerted-sessions)))))
+          (session.idle
+           (opencode--maybe-run-files-finished-editing-hook .sessionID)
+           (opencode-api-session (.sessionID)
+               session
+             (let ((buffer (gethash .sessionID opencode-session-buffers)))
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (opencode--show-prompt)))
+               (unless (or
+                        (opencode--buffer-active-p buffer)
+                        ;; don't show alert for subagent sessions
+                        (alist-get 'parentID session))
+                 (opencode--toast-show `((title . "OpenCode Finished")
+                                         (message . ,(alist-get 'title session))
+                                         (variant . "success")))
+                 (push session opencode-alerted-sessions)))))
           (session.status (pcase .status.type
                             ((or "busy" "idle")
                              (opencode-session--set-status .sessionID .status.type))
@@ -439,12 +532,14 @@ Also prompts for pending questions or permissions if any."
                              (opencode-api-session (.sessionID)
                                  session
                                (opencode--toast-show `((title . ,(concat "OpenCode: "
-                                                                  (alist-get 'title session)))
+                                                                         (alist-get 'title session)))
                                                        (message . ,(format "%s\n\nRetry #%d"
-                                                                    .status.message
-                                                                    .status.attempt))
+                                                                           .status.message
+                                                                           .status.attempt))
                                                        (variant . "warning")))))))
           ((session.created session.updated session.deleted)
+           (when (eq 'session.deleted msg-type)
+             (run-hook-with-args 'opencode-session-deleted-functions .info.id))
            (dolist (buffer (map-elt opencode--session-control-buffers .info.projectID))
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
@@ -455,68 +550,87 @@ Also prompts for pending questions or permissions if any."
                  (session.updated (rename-buffer (format "*OpenCode: %s*" .info.title) t))
                  (session.deleted (delete-process))))))
           (session.error (opencode-session--display-error .sessionID .error.data.message))
-          (message.part.updated (opencode-session--update-part .part .delta .part.type))
+          (message.part.updated
+           (opencode--maybe-run-file-edited-hook .part)
+           (opencode-session--update-part .part .delta .part.type))
           (message.part.delta (opencode-session--update-part properties .delta
                                                              (gethash .partID opencode-part-type)))
-          (message.updated (opencode-session--message-updated .info))
+          (message.updated
+           (opencode--record-files-edited-this-turn .info)
+           (opencode-session--message-updated .info))
           (permission.asked
            (opencode--permission-request
             .id .sessionID .permission
             .metadata
             (seq-into .patterns 'list)
             (seq-into .always 'list)))
-           (question.asked
-            (opencode--question-request .id .sessionID .questions))
+          (question.asked
+           (opencode--question-request .id .sessionID .questions))
           (otherwise (opencode--log-event "WARNING" "unhandled message type")))))))
 
-(defun opencode--handle-message (event)
-  "Handle a message EVENT from opencode server."
-  (opencode--handle-message-data (plz-event-source-event-data event)))
+(defun opencode--handle-global-event (event)
+  "Handle a global wrapper EVENT from opencode server."
+  (let* ((data (json-read-from-string (plz-event-source-event-data event)))
+         (directory (alist-get 'directory data))
+         (payload (alist-get 'payload data)))
+    (if (and directory payload)
+        (let ((default-directory (opencode--normalize-directory directory)))
+          (opencode--handle-message payload))
+      (unless (string= "server.heartbeat" (alist-get 'type payload))
+        (opencode--log-event "WARNING GLOBAL EVENT" data)))))
+
+(defun opencode--subscribe-global-events ()
+  "Subscribe to the global opencode event stream."
+  (setq opencode--event-subscription
+        (plz-media-type-request
+          'get (concat opencode-api-url "/global/event")
+          :as `(media-types
+                ((text/event-stream
+                  . ,(plz-event-source:text/event-stream
+                      :events `((open . ,(lambda (event)
+                                           (opencode--log-event "OPEN" event)))
+                                (message . opencode--handle-global-event)
+                                (close . opencode-disconnect))))))
+          :headers (delq nil (list (opencode--auth-header)))
+          :then 'opencode-disconnect
+          :else 'opencode-disconnect))
+  (set-process-query-on-exit-flag opencode--event-subscription nil))
 
 (defun opencode-disconnect (&optional event)
   "Disconnect from opencode server, optionally log EVENT."
   (interactive)
   (opencode--log-event "DISCONNECT" event)
-  (cl-loop for (process) in opencode--event-subscriptions
-           when (process-live-p process)
-           do (kill-process process))
+  (when (process-live-p opencode--event-subscription)
+    (kill-process opencode--event-subscription))
   (when (process-live-p opencode--process)
     (set-process-sentinel opencode--process nil)
     (kill-process opencode--process))
-  (setq opencode--event-subscriptions nil))
-
-(defun opencode--disconnect-process (process &optional event)
-  "Disconnect a single SSE PROCESS, optionally logging EVENT."
-  (opencode--log-event "DISCONNECT" event)
-  (setq opencode--event-subscriptions
-        (assq-delete-all process opencode--event-subscriptions))
-  (when (process-live-p process)
-    (let ((process-query-on-exit-flag nil))
-      (set-process-sentinel process nil)
-      (kill-process process))))
+  (setq opencode--event-subscription nil
+        opencode--slash-commands-by-directory nil))
 
 (defun opencode--fetch-agents ()
   "Fetch available agents from server and filter out hidden agents."
   (opencode-api-agents agents
     (setq opencode-agents
-          (seq-remove (lambda (agent)
-                        (alist-get 'hidden agent))
+          (seq-filter (lambda (agent)
+                        (opencode--json-falsy (alist-get 'hidden agent)))
                       agents))))
 
-(defun opencode-new-session (&optional title)
+(cl-defun opencode-new-session (&key title callback)
   "Create a new session. With a prefix argument it will ask for TITLE.
-Without it will use a default title and then automatically generate one."
+Without it will use a default title and then automatically generate one.
+If CALLBACK is given, it will be called with the session after it is created."
   (interactive
-   (list (when current-prefix-arg
-           (read-string "Title: "))))
+   (when current-prefix-arg
+     (list :title (read-string "Title: "))))
   (opencode-autoconnect
    (lambda ()
-     (opencode-process-events default-directory)
+     (opencode--download-slash-commands default-directory)
      (opencode-api-create-session (if title
                                       `((title . ,title))
                                     (make-hash-table))
          session
-       (opencode-open-session session)))))
+       (opencode-open-session session :callback callback)))))
 
 (defun opencode-toggle-mcp ()
   "Completing read to select an MCP to toggle."
@@ -599,50 +713,15 @@ If point is before the first prompt, creates a new session instead."
          "Restored all edits in session"
        "Failed to restore edits"))))
 
-(defun opencode-process-events (directory)
-  "Connect to the opencode event stream and process all events for DIRECTORY."
-  (let ((directory (file-name-as-directory
-                    (file-truename (expand-file-name directory)))))
-    (let ((existing
-           (cl-remove-if-not
-            (lambda (entry)
-              (equal directory
-                     (file-name-as-directory
-                      (file-truename (expand-file-name (cdr entry))))))
-            opencode--event-subscriptions)))
-      (when existing
-        (setcdr (car existing) directory)
-        (dolist (entry (cdr existing))
-          (opencode--disconnect-process (car entry))
-          (setq opencode--event-subscriptions
-                (delq entry opencode--event-subscriptions))))
-      (unless existing
-        (let (process
-              (event-stream
-               (if opencode-use-fast-event-stream
-                   (opencode--event-stream :directory directory)
-                 (plz-event-source:text/event-stream
-                  :events `((open . ,(lambda (event)
-                                       (opencode--log-event "OPEN" event)))
-                            (message . ,(lambda (event)
-                                          (let ((default-directory directory))
-                                            (opencode--handle-message event))))
-                            (close . ,(lambda (event)
-                                        (opencode--disconnect-process process event))))))))
-          (setq process
-                (plz-media-type-request
-                 'get (concat opencode-api-url "/event")
-                 :as `(media-types
-                        ((text/event-stream
-                          . ,event-stream)))
-                 :headers `(("x-opencode-directory" . ,directory)
-                            ,(opencode--auth-header))
-                 :then (lambda (&rest _)
-                         (opencode--disconnect-process process))
-                 :else (lambda (response)
-                         (opencode--disconnect-process process response))))
-          (set-process-query-on-exit-flag process nil)
-          (push (cons process directory) opencode--event-subscriptions))))))
+(defun opencode--download-slash-commands (directory)
+  "Download slash commands for DIRECTORY."
+  (setf directory (opencode--normalize-directory directory))
+  (unless (assoc directory opencode--slash-commands-by-directory)
+    (let ((default-directory directory))
+      (opencode-api-commands commands
+        (setf (alist-get directory opencode--slash-commands-by-directory
+                         nil nil #'string=)
+              commands)))))
 
 (provide 'opencode)
 ;;; opencode.el ends here
