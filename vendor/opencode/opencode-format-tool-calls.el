@@ -30,13 +30,16 @@
 
 (defun opencode--format-tool-call (tool input)
   "Format TOOL call with INPUT arguments for display."
+  (unless (listp input)
+    (setq input nil))
   (let-alist input
     (when .filePath
       (setf .filePath (opencode--relative-path-for-display .filePath)))
     (pcase tool
       ("edit"
-       (concat "edit " .filePath ":\n"
-               (opencode--format-edit-diff .oldString .newString)
+       (concat "edit " (or .filePath "<unknown>") ":\n"
+               (opencode--format-edit-diff (or .oldString "")
+                                           (or .newString ""))
                "\n"))
       ("apply_patch"
        (concat "apply_patch:\n"
@@ -45,8 +48,8 @@
       ("read"
        (if (and .offset .limit)
            (format "read %s [offset=%d, limit=%d]\n\n"
-                   .filePath .offset .limit)
-         (format "read %s\n\n" .filePath)))
+                    (or .filePath "<unknown>") .offset .limit)
+          (format "read %s\n\n" (or .filePath "<unknown>"))))
       ("grep"
        (concat
         (format "grep \"%s\"" .pattern)
@@ -76,9 +79,9 @@
       (_ (if (= 1 (length input))
              (format "%s %s\n\n" tool (cdar input))
            ;; Multiple arguments: tool-name, then arg-name: value per line
-           (concat tool " ["
-                   (mapconcat (lambda (pair)
-                                (format "%s=%s" (car pair) (cdr pair)))
+            (concat (or tool "tool") " ["
+                    (mapconcat (lambda (pair)
+                                 (format "%s=%s" (car pair) (cdr pair)))
                               input
                               ", ")
                    "]\n\n"))))))
@@ -112,11 +115,11 @@
   "Generate diff output comparing OLD-STRING to NEW-STRING."
   (with-temp-buffer
     (let ((old-buf (current-buffer)))
-      (insert old-string)
+      (insert (or old-string ""))
       (insert "\n")
       (with-temp-buffer
         (let ((new-buf (current-buffer)))
-          (insert new-string)
+          (insert (or new-string ""))
           (insert "\n")
           (with-temp-buffer
             (let ((inhibit-read-only t))
@@ -135,8 +138,10 @@
 
 (defun opencode--format-apply-patch (patch-text)
   "Return PATCH-TEXT formatted for `apply_patch' display."
-  (opencode--fontify-diff-string
-   (with-temp-buffer
+  (if (not (stringp patch-text))
+      "<missing patch text>"
+    (opencode--fontify-diff-string
+     (with-temp-buffer
      (insert patch-text)
      (goto-char (point-min))
      (while (re-search-forward "^\\*\\*\\* \\(?:Begin\\|End\\) Patch\\n?" nil t)
@@ -178,7 +183,7 @@
       (goto-char (point-max))
       (skip-chars-backward "\n")
       (delete-region (point) (point-max))
-      (buffer-string))))
+      (buffer-string)))))
 
 (provide 'opencode-format-tool-calls)
 ;;; opencode-format-tool-calls.el ends here

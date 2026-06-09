@@ -550,11 +550,42 @@ Otherwise prompt for file in current project."
           (opencode--insert-intangible (concat "@" name) 'agent-name name)))
     (call-interactively #'self-insert-command)))
 
+(defun opencode--primary-agent ()
+  "Return the primary OpenCode agent, or the first available agent."
+  (or (seq-find (lambda (agent)
+                  (string= "primary" (alist-get 'mode agent)))
+                opencode-agents)
+      (car opencode-agents)))
+
+(defun opencode--effective-session-agent ()
+  "Return a valid agent for the current session."
+  (unless opencode-session-agents
+    (setq opencode-session-agents (copy-tree opencode-agents)))
+  (let ((agent (or opencode-session-agent
+                   (seq-find (lambda (agent)
+                               (string= "primary" (alist-get 'mode agent)))
+                             opencode-session-agents)
+                   (car opencode-session-agents)
+                   (opencode--primary-agent))))
+    (unless agent
+      (user-error "No OpenCode agent is available"))
+    (unless (memq agent opencode-session-agents)
+      (setq agent (copy-tree agent))
+      (push agent opencode-session-agents))
+    (unless (alist-get 'name agent)
+      (user-error "Current OpenCode agent has no name"))
+    (unless (alist-get 'model agent)
+      (setf (alist-get 'model agent) opencode-last-model))
+    (setq opencode-session-agent agent)
+    agent))
+
 (defun opencode--send-input (_proc string)
   "Send STRING as input to current opencode session."
+  (when (string-empty-p (string-trim string))
+    (user-error "Cannot send an empty prompt"))
   (opencode--highlight-input)
   (opencode--output "\n")
-  (let-alist opencode-session-agent
+  (let-alist (opencode--effective-session-agent)
     (cond
      ((string-prefix-p "/" string)
       (let ((space-pos (seq-position string ?\s)))
@@ -587,13 +618,14 @@ Otherwise prompt for file in current project."
   (let-alist info
     (pcase .role
       ("assistant"
-       (when .time.completed
-         (when-let (buffer (map-elt opencode-session-buffers .sessionID))
-           (with-current-buffer buffer
-             (setq opencode-session-tokens
-                   (+ .tokens.input .tokens.output .tokens.reasoning
-                      .tokens.cache.read .tokens.cache.write))
-             (force-mode-line-update))))
+         (when .time.completed
+          (when-let (buffer (map-elt opencode-session-buffers .sessionID))
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (setq opencode-session-tokens
+                      (+ .tokens.input .tokens.output .tokens.reasoning
+                         .tokens.cache.read .tokens.cache.write))
+                (force-mode-line-update)))))
        (if (or .finish .error)
            (setf opencode-assistant-messages
                  (assoc-delete-all .id opencode-assistant-messages))
@@ -659,6 +691,7 @@ TYPE is text|reasoning|tool|step-finish"
       (when (string-empty-p .text)
         (puthash .id type opencode-part-type)))
     (when-let ((buffer (gethash .sessionID opencode-session-buffers))
+               (_ (buffer-live-p buffer))
                (process (get-buffer-process buffer))
                (message-parts (assoc-string .messageID opencode-assistant-messages)))
       (with-current-buffer buffer
@@ -965,10 +998,11 @@ Returns nil if point is before the first prompt."
 (defun opencode-session--display-error (session-id message)
   "Display error MESSAGE in SESSION-ID and then new prompt."
   (when-let (buffer (gethash session-id opencode-session-buffers))
-    (with-current-buffer buffer
-      (opencode--output (propertize message 'face 'error))
-      (opencode--output "\n\n")
-      (opencode--show-prompt))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (opencode--output (propertize message 'face 'error))
+        (opencode--output "\n\n")
+        (opencode--show-prompt)))))
 
 (defun opencode-abort-session ()
   "Abort a busy session and go back to prompt."
