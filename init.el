@@ -736,7 +736,7 @@ Some packages/modes can transiently remap these during startup."
              opencode-add-buffer-dwim)
   :bind (("C-c o" . opencode))
   :config
-  (setq opencode-port 4097)
+  (setq opencode-port 4098)
   (setq opencode-worktree-directory
         (expand-file-name "var/opencode/worktrees/" user-emacs-directory))
   (make-directory opencode-worktree-directory t))
