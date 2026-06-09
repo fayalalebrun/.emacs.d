@@ -27,8 +27,14 @@ Or nil (default) to turn off logging.")
   (when opencode-server-password
     (cons "Authorization"
           (concat "Basic "
-                  (base64-encode-string
-                   (format "%s:%s" opencode-server-username opencode-server-password))))))
+                   (base64-encode-string
+                    (format "%s:%s" opencode-server-username opencode-server-password))))))
+
+(defun opencode-api--encode-data (data)
+  "Encode DATA for an OpenCode API request body."
+  (json-encode (if (listp data)
+                   (delq nil (copy-sequence data))
+                 data)))
 
 (eval-and-compile
   (cl-defun opencode-api--call (method path return-var body &key data)
@@ -52,11 +58,11 @@ and saving to CURRENT-BUFFER while running BODY."
            :as (lambda () (unless (string-empty-p (buffer-string))
                        (json-parse-buffer :array-type 'list
                                           :object-type 'alist)))
-           :headers `(("Content-Type" . "application/json")
-                      ,(cons "x-opencode-directory" default-directory)
-                      ,(opencode--auth-header))
-           ,@(when data
-               `(:body (json-encode ,saved-data)))
+            :headers `(("Content-Type" . "application/json")
+                       ,(cons "x-opencode-directory" default-directory)
+                       ,(opencode--auth-header))
+            ,@(when data
+                `(:body (opencode-api--encode-data ,saved-data)))
            :then (lambda (,result)
                    (when opencode-api-log-max-lines
                      (with-current-buffer
@@ -78,9 +84,9 @@ and saving to CURRENT-BUFFER while running BODY."
                          (save-excursion
                            (goto-char (point-max))
                            (insert "ERROR: " error-msg "\n"))))
-                     (if opencode--event-subscription
-                         (error error-msg)
-                       (error "Not connected to opencode"))))))))
+                      (if opencode-api-url
+                          (error error-msg)
+                        (error "Not connected to opencode"))))))))
 
   (cl-defun opencode-api--wrap (method path &key elisp-macro-name nodata)
     "Define a macro to wrap api call with METHOD and PATH.

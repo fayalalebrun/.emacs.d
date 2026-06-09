@@ -92,21 +92,23 @@ BODY is evaluated inside `(let-alist tool-args ...)'."
 
 (defun opencode--format-tool-call (tool input)
   "Format TOOL call with INPUT arguments for display."
-  (when (alist-get 'filePath input)
-    (setf (alist-get 'filePath input) (opencode--relative-path-for-display (alist-get 'filePath input))))
-
+  (unless (listp input)
+    (setq input nil))
+  (when-let ((file-path (alist-get 'filePath input)))
+    (setf (alist-get 'filePath input)
+          (opencode--relative-path-for-display file-path)))
   (if-let (tool-formatter (cdr (assoc-string tool opencode-tool-formatters)))
       (funcall tool-formatter input)
     (if (= 1 (length input))
-        (let ((arg (cdar input)))
+        (let ((arg (format "%s" (cdar input))))
           (format "%s%s%s"
-                  tool
+                  (or tool "tool")
                   (if (string-match-p "\n" arg)
                       "\n"
                     " ")
                   arg))
       ;; Multiple arguments: tool-name, then arg-name: value per line
-      (concat tool " ["
+      (concat (or tool "tool") " ["
               (mapconcat (lambda (pair)
                            (format "%s=%s" (car pair) (cdr pair)))
                          input
@@ -142,11 +144,11 @@ BODY is evaluated inside `(let-alist tool-args ...)'."
   "Generate diff output comparing OLD-STRING to NEW-STRING."
   (with-temp-buffer
     (let ((old-buf (current-buffer)))
-      (insert old-string)
+      (insert (or old-string ""))
       (insert "\n")
       (with-temp-buffer
         (let ((new-buf (current-buffer)))
-          (insert new-string)
+          (insert (or new-string ""))
           (insert "\n")
           (with-temp-buffer
             (let ((inhibit-read-only t))
@@ -165,8 +167,10 @@ BODY is evaluated inside `(let-alist tool-args ...)'."
 
 (defun opencode--format-apply-patch (patch-text)
   "Return PATCH-TEXT formatted for `apply_patch' display."
-  (opencode--fontify-diff-string
-   (with-temp-buffer
+  (if (not (stringp patch-text))
+      "<missing patch text>"
+    (opencode--fontify-diff-string
+     (with-temp-buffer
      (insert patch-text)
      (goto-char (point-min))
      (while (re-search-forward "^\\*\\*\\* \\(?:Begin\\|End\\) Patch\\n?" nil t)
@@ -208,7 +212,7 @@ BODY is evaluated inside `(let-alist tool-args ...)'."
       (goto-char (point-max))
       (skip-chars-backward "\n")
       (delete-region (point) (point-max))
-      (buffer-string))))
+      (buffer-string)))))
 
 (provide 'opencode-format-tool-calls)
 ;;; opencode-format-tool-calls.el ends here
