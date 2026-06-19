@@ -28,8 +28,8 @@ Or nil (default) to turn off logging.")
   (when opencode-server-password
     (cons "Authorization"
           (concat "Basic "
-                   (base64-encode-string
-                    (format "%s:%s" opencode-server-username opencode-server-password))))))
+                  (base64-encode-string
+                   (format "%s:%s" opencode-server-username opencode-server-password))))))
 
 (defun opencode-api--encode-data (data)
   "Encode DATA for an OpenCode API request body."
@@ -46,51 +46,51 @@ and saving to CURRENT-BUFFER while running BODY."
       `(let ((,current-buffer (current-buffer))
              (,saved-path ,path)
              (,saved-data ,data))
-          (when opencode-api-log-max-lines
-            (with-current-buffer (get-buffer-create "*opencode-api-log*")
+         (when opencode-api-log-max-lines
+           (with-current-buffer (get-buffer-create "*opencode-api-log*")
              (save-excursion
                (goto-char (point-max))
                (insert "REQUEST: " ,saved-path "\n")
                (when ,saved-data
                  (insert "REQUEST BODY:")
                  (pp ,saved-data (current-buffer)))
-                (opencode--truncate-at-max-lines opencode-api-log-max-lines))))
-          (opencode-record--api-request ',method ,saved-path ,saved-data)
-          (plz ',method (concat opencode-api-url ,saved-path)
+               (opencode--truncate-at-max-lines opencode-api-log-max-lines))))
+         (opencode-record--api-request ',method ,saved-path ,saved-data)
+         (plz ',method (concat opencode-api-url ,saved-path)
            :as (lambda () (unless (string-empty-p (buffer-string))
-                       (json-parse-buffer :array-type 'list
-                                          :object-type 'alist)))
-            :headers `(("Content-Type" . "application/json")
-                       ,(cons "x-opencode-directory" default-directory)
-                       ,(opencode--auth-header))
-            ,@(when data
-                `(:body (opencode-api--encode-data ,saved-data)))
+			    (json-parse-buffer :array-type 'list
+                                               :object-type 'alist)))
+           :headers `(("Content-Type" . "application/json")
+                      ,(cons "x-opencode-directory" default-directory)
+                      ,(opencode--auth-header))
+           ,@(when data
+               `(:body (opencode-api--encode-data ,saved-data)))
            :then (lambda (,result)
-                    (when opencode-api-log-max-lines
-                      (with-current-buffer
-                          (get-buffer-create "*opencode-api-log*")
-                        (save-excursion
-                          (goto-char (point-max))
-                          (insert "RESPONSE: ")
-                          (pp ,result (current-buffer)))))
-                    (opencode-record--api-response ',method ,saved-path ,result)
-                    (let ((,return-var ,result))
+                   (when opencode-api-log-max-lines
+                     (with-current-buffer
+                         (get-buffer-create "*opencode-api-log*")
+                       (save-excursion
+                         (goto-char (point-max))
+                         (insert "RESPONSE: ")
+                         (pp ,result (current-buffer)))))
+                   (opencode-record--api-response ',method ,saved-path ,result)
+                   (let ((,return-var ,result))
                      (if (buffer-live-p ,current-buffer)
                          (with-current-buffer ,current-buffer
                            ,@body)
                        ,@body)))
            :else (lambda (response)
-                    (let ((error-msg (format "error requesting %s: %s" ,saved-path response)))
-                      (opencode-record--api-error ',method ,saved-path response)
-                      (when opencode-api-log-max-lines
+                   (let ((error-msg (format "error requesting %s: %s" ,saved-path response)))
+                     (opencode-record--api-error ',method ,saved-path response)
+                     (when opencode-api-log-max-lines
                        (with-current-buffer
                            (get-buffer-create "*opencode-api-log*")
                          (save-excursion
                            (goto-char (point-max))
                            (insert "ERROR: " error-msg "\n"))))
-                      (if opencode-api-url
-                          (error error-msg)
-                        (error "Not connected to opencode"))))))))
+                     (if opencode-api-url
+                         (error error-msg)
+                       (error "Not connected to opencode"))))))))
 
   (cl-defun opencode-api--wrap (method path &key elisp-macro-name nodata)
     "Define a macro to wrap api call with METHOD and PATH.
@@ -168,6 +168,7 @@ body when it normally would (POST PATCH)."
      (session-todos "/session/%s/todo")
      (session-diff "/session/%s/diff")
      (session-messages "/session/%s/message")
+     (session-messages-limited "/session/%s/message?limit=%s")
      (post sync-message "/session/%s/message")
      (post send-message "/session/%s/prompt_async")
      (message-details "/session/%s/message/%s")
@@ -181,12 +182,12 @@ body when it normally would (POST PATCH)."
      (post fork-session "/session/%s/fork")
      (post revert-message "/session/%s/revert")
      (post nodata unrevert-all "/session/%s/unrevert")
-      (post respond-permission-request "/session/%s/permissions/%s")
-      (post nodata share-session "/session/%s/share")
-      (delete unshare-session "/session/%s/share")
-      (post summarize-session "/session/%s/summarize")
-      (post execute-command "/session/%s/command")
-      (post execute-shell "/session/%s/shell")
+     (post respond-permission-request "/session/%s/permissions/%s")
+     (post nodata share-session "/session/%s/share")
+     (delete unshare-session "/session/%s/share")
+     (post summarize-session "/session/%s/summarize")
+     (post execute-command "/session/%s/command")
+     (post execute-shell "/session/%s/shell")
      (post reply-questions "/question/%s/reply")
      (post nodata reject-questions "/question/%s/reject")
      (commands "/command")

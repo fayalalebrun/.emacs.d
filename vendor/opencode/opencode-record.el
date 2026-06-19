@@ -47,6 +47,7 @@
 (defvar opencode-session--idle-finalize-callback)
 (defvar opencode-session--suspect-reconcile-timer)
 (defvar opencode-session--stream-message-states)
+(defvar opencode-session--history-validated-message-ids)
 (defvar opencode--pending-question-tools)
 (defvar opencode--completed-question-tools)
 (defvar opencode--pending-permission-tools)
@@ -910,6 +911,7 @@ LABEL is included in the output filename when non-empty."
         opencode-part-region-end (make-hash-table :test 'equal)
         opencode-part-message (make-hash-table :test 'equal)
         opencode-message-roles (make-hash-table :test 'equal)
+        opencode-session--history-validated-message-ids (make-hash-table :test 'equal)
         opencode-shell-echo (make-hash-table :test 'equal)
         opencode-assistant-messages nil
         opencode-rendered-message-ids (make-hash-table :test 'equal)
@@ -1082,6 +1084,7 @@ LABEL is included in the output filename when non-empty."
         opencode-part-region-end (make-hash-table :test 'equal)
         opencode-part-message (make-hash-table :test 'equal)
         opencode-message-roles (make-hash-table :test 'equal)
+        opencode-session--history-validated-message-ids (make-hash-table :test 'equal)
         opencode-shell-echo (make-hash-table :test 'equal)
         opencode-assistant-messages nil
         opencode-rendered-message-ids (make-hash-table :test 'equal)

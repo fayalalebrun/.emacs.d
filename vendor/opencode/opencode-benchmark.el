@@ -26,6 +26,8 @@
 (require 'opencode-sessions)
 (require 'subr-x)
 
+(defvar opencode-session--history-validated-message-ids)
+
 (defgroup opencode-benchmark nil
   "Synthetic benchmarks for the OpenCode Emacs frontend."
   :group 'opencode)
@@ -276,6 +278,7 @@ When USE-PROCESS is non-nil, attach a sleeping process for comint output."
         opencode-part-region-end (make-hash-table :test 'equal)
         opencode-part-message (make-hash-table :test 'equal)
         opencode-message-roles (make-hash-table :test 'equal)
+        opencode-session--history-validated-message-ids (make-hash-table :test 'equal)
         opencode-shell-echo (make-hash-table :test 'equal)
         opencode-assistant-messages nil
         opencode-rendered-message-ids (make-hash-table :test 'equal)

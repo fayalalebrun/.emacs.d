@@ -166,6 +166,10 @@ Requests are processed FIFO.")
 (defvar-local opencode-rendered-message-ids (make-hash-table :test 'equal)
   "Assistant message ids already rendered in the current session buffer.")
 
+(defvar-local opencode-session--history-validated-message-ids
+    (make-hash-table :test 'equal)
+  "Message ids whose rendered transcript visibility was already validated.")
+
 (defvar-local opencode-session--interrupted-message-ids (make-hash-table :test 'equal)
   "Assistant message ids that already received an interrupted marker.")
 
@@ -189,6 +193,9 @@ Requests are processed FIFO.")
 
 (defvar-local opencode--question-recover-timer nil
   "Timer used to recover missed pending questions for this session buffer.")
+
+(defvar-local opencode-session--question-recover-last-finished nil
+  "Float timestamp when pending-question recovery last finished.")
 
 (defvar-local opencode--pending-question-tools (make-hash-table :test 'equal)
   "Mapping from question tool identity to pending question ids.")
@@ -270,6 +277,11 @@ Requests are processed FIFO.")
   :type 'number
   :group 'opencode)
 
+(defcustom opencode-session-question-recover-cooldown 15
+  "Seconds to wait before starting another empty question recovery cycle."
+  :type 'number
+  :group 'opencode)
+
 (defcustom opencode-session-live-markdown-delay 0.2
   "Seconds to coalesce live markdown rendering while text streams."
   :type 'number
@@ -303,6 +315,21 @@ or showing the prompt in the middle of the remaining output."
 (defcustom opencode-session-suspect-history-limit 50
   "Maximum persisted messages to inspect when reconciling suspect state."
   :type 'integer
+  :group 'opencode)
+
+(defcustom opencode-session-history-sync-limit 50
+  "Maximum persisted messages to fetch for broad live history sync.
+Session open and explicit history replay may still fetch complete history.  Live
+reconciliation uses this bounded fetch so status/timer events cannot download a
+large multi-megabyte session transcript during ordinary streaming."
+  :type 'integer
+  :group 'opencode)
+
+(defcustom opencode-session-suspect-stream-max-age 30
+  "Seconds to keep unfinished stream metadata eligible for suspect sync.
+Active assistant messages are always eligible.  This bound prevents old streams
+that never received a finish event from widening later targeted reconciles."
+  :type 'number
   :group 'opencode)
 
 (defcustom opencode-session-stream-quiet-reconcile-delay 2.0
@@ -940,14 +967,27 @@ Retry ATTEMPTS times after DELAY seconds while no question is queued."
                  (when (buffer-live-p buffer)
                    (with-current-buffer buffer
                      (setq opencode--question-recover-timer nil)
-                     (unless (or opencode-session-pending-questions
-                                 (opencode-session--sync-pending-question)
-                                 (<= attempts 1))
-                        (opencode-session--schedule-question-recover
-                         session-id opencode-session-question-recover-interval
-                         (1- attempts))))))
-                session-id buffer
-                (or attempts opencode-session-question-recover-attempts)))))))
+                     (let ((recovered
+                            (unless opencode-session-pending-questions
+                              (opencode-session--sync-pending-question))))
+                       (if (or opencode-session-pending-questions
+                               recovered
+                               (<= attempts 1))
+                           (setq opencode-session--question-recover-last-finished
+                                 (float-time))
+                         (opencode-session--schedule-question-recover
+                          session-id opencode-session-question-recover-interval
+                          (1- attempts)))))))
+               session-id buffer
+               (or attempts opencode-session-question-recover-attempts)))))))
+
+(defun opencode-session--question-recover-cooling-down-p ()
+  "Return non-nil when pending-question recovery is cooling down."
+  (and (numberp opencode-session--question-recover-last-finished)
+       (numberp opencode-session-question-recover-cooldown)
+       (> opencode-session-question-recover-cooldown 0)
+       (< (- (float-time) opencode-session--question-recover-last-finished)
+          opencode-session-question-recover-cooldown)))
 
 (defun opencode-session--maybe-schedule-question-recover (session-id &optional delay)
   "Schedule pending-question recovery for SESSION-ID if none is active."
@@ -956,7 +996,8 @@ Retry ATTEMPTS times after DELAY seconds while no question is queued."
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (unless (or opencode-session-pending-questions
-                      (timerp opencode--question-recover-timer))
+                      (timerp opencode--question-recover-timer)
+                      (opencode-session--question-recover-cooling-down-p))
             (opencode-session--schedule-question-recover session-id delay)))))))
 
 (defun opencode-session--clear-pending-question (question-id)
@@ -1229,17 +1270,36 @@ If another request is already in flight, queue CALLBACK and return nil."
     (setq state (plist-put state :finished-time (float-time)))
     (puthash message-id state opencode-session--stream-message-states)))
 
+(defun opencode-session--forget-message-stream-state (message-id)
+  "Forget stream-integrity metadata for MESSAGE-ID."
+  (when (stringp message-id)
+    (remhash message-id opencode-session--stream-message-states)))
+
+(defun opencode-session--recent-stream-state-p (state now)
+  "Return non-nil when STATE is recent enough at NOW for suspect sync."
+  (let ((time (or (plist-get state :suspect-time)
+                  (plist-get state :last-delta)
+                  (plist-get state :last-event))))
+    (and (numberp time)
+         (or (not (numberp opencode-session-suspect-stream-max-age))
+             (<= (- now time) opencode-session-suspect-stream-max-age)))))
+
 (defun opencode-session--suspect-message-ids ()
   "Return message ids whose stream state should be checked against history."
-  (let (ids)
+  (let ((now (float-time))
+        active-ids
+        ids)
     (dolist (entry opencode-assistant-messages)
       (when (stringp (car entry))
-        (push (car entry) ids)))
+        (push (car entry) ids)
+        (push (car entry) active-ids)))
     (maphash
      (lambda (message-id state)
        (when (and (not (plist-get state :finished))
+                  (not (member message-id active-ids))
                   (or (plist-get state :last-delta)
-                      (plist-get state :suspect)))
+                      (plist-get state :suspect))
+                  (opencode-session--recent-stream-state-p state now))
          (push message-id ids)))
      opencode-session--stream-message-states)
     (delete-dups ids)))
@@ -1262,40 +1322,96 @@ If another request is already in flight, queue CALLBACK and return nil."
 (defun opencode-session--target-message-ids (target)
   "Return message ids from TARGET.
 TARGET may be nil, a list of ids, or a function returning a list of ids."
+  (delete-dups
+   (seq-filter
+    (lambda (id) (and (stringp id) (not (string-empty-p id))))
+    (cond
+     ((functionp target) (funcall target))
+     ((listp target) target)))))
+
+(defun opencode-session--message-detail-result (result)
+  "Return a persisted message from message detail RESULT, if present."
   (cond
-   ((functionp target) (funcall target))
-   ((listp target) target)))
+   ((and (listp result) (alist-get 'info result)) result)
+   ((and (listp result) (listp (car result)) (alist-get 'info (car result)))
+    (car result))))
+
+(defun opencode-session--run-history-callback (callback)
+  "Run CALLBACK in the current session buffer when non-nil."
+  (when callback
+    (funcall callback)))
+
+(defun opencode-session--sync-history-message-details (session-id reason callback ids)
+  "Fetch targeted persisted IDS for SESSION-ID and reconcile them.
+REASON is diagnostic text.  CALLBACK runs after targeted reconciliation."
+  (ignore reason)
+  (if (null ids)
+      (opencode-session--run-history-callback callback)
+    (let ((remaining (length ids))
+          messages)
+      (dolist (message-id ids)
+        (opencode-api-message-details (session-id message-id) message
+          (with-current-buffer (current-buffer)
+            (when-let ((stored (opencode-session--message-detail-result message)))
+              (push stored messages))
+            (setq remaining (1- remaining))
+            (when (<= remaining 0)
+              (unwind-protect
+                  (progn
+                    (opencode-session--apply-history-messages
+                     (nreverse messages) ids)
+                    (opencode-session--run-history-callback callback))
+                (opencode-session--history-reconcile-finish)))))))))
+
+(defun opencode-session--sync-history-broad (session-id buffer limit)
+  "Fetch a bounded persisted history tail for SESSION-ID into BUFFER."
+  (let ((effective-limit (or limit opencode-session-history-sync-limit)))
+    (if (and (integerp effective-limit) (> effective-limit 0))
+        (opencode-api-session-messages-limited (session-id effective-limit)
+            messages
+          (with-current-buffer buffer
+            (unwind-protect
+                (opencode-session--apply-history-messages messages nil)
+              (opencode-session--history-reconcile-finish))))
+      (opencode-api-session-messages (session-id) messages
+        (with-current-buffer buffer
+          (unwind-protect
+              (let ((tail (opencode-session--take-last messages limit)))
+                (opencode-session--apply-history-messages tail nil))
+            (opencode-session--history-reconcile-finish)))))))
 
 (defun opencode-session--sync-history-tail (session-id reason &optional callback
-						       target limit)
+                                                       target limit)
   "Fetch persisted history for SESSION-ID and apply a bounded tail.
 REASON describes the trigger for diagnostics.  CALLBACK, when non-nil, runs in
 the session buffer after the sync.  TARGET may be nil for broad reconciliation,
 a list of message ids, or a function returning message ids in the session
-buffer.  LIMIT bounds the persisted history tail inspected."
+  buffer.  LIMIT bounds the persisted history tail inspected."
   (ignore reason)
   (when-let ((buffer (and session-id
                           (gethash session-id opencode-session-buffers))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (if (opencode-session--history-reconcile-start
+        (let ((ids (and target (opencode-session--target-message-ids target))))
+          (cond
+           ((and target (null ids))
+            (opencode-session--run-history-callback callback))
+           ((opencode-session--history-reconcile-start
              (unless target callback))
             (let ((default-directory (opencode-session--directory)))
-              (opencode-api-session-messages (session-id) messages
-                (with-current-buffer buffer
-                  (unwind-protect
-                      (let ((tail (opencode-session--take-last messages limit))
-                            (ids (opencode-session--target-message-ids target)))
-                        (opencode-session--apply-history-messages tail ids))
-                    (opencode-session--history-reconcile-finish)))))
-          ;; A broad sync already in flight will usually cover nil TARGET.  For
-          ;; targeted syncs, queue a follow-up so a one-message repair is not
-          ;; dropped behind an unrelated in-flight request.
-          (when target
+              (if ids
+                  (opencode-session--sync-history-message-details
+                   session-id reason callback ids)
+                (opencode-session--sync-history-broad
+                 session-id buffer limit))))
+           ;; A broad sync already in flight will usually cover nil TARGET.  For
+           ;; targeted syncs, queue a follow-up so a one-message repair is not
+           ;; dropped behind an unrelated in-flight request.
+           (target
             (push (lambda ()
                     (opencode-session--sync-history-tail
                      session-id reason callback target limit))
-                  opencode-session--history-reconcile-callbacks)))))))
+                  opencode-session--history-reconcile-callbacks))))))))
 
 (defun opencode-session--reconcile-suspect-history (session-id &optional callback)
   "Reconcile only suspect active stream state for SESSION-ID.
@@ -1367,7 +1483,7 @@ omit sessions that are still streaming."
       (opencode-session--reconcile-pending session-id))
     (when (equal status "busy")
       (when-let ((buffer (and session-id
-                               (gethash session-id opencode-session-buffers))))
+                              (gethash session-id opencode-session-buffers))))
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
             (when (or (and (not opencode-assistant-messages)
@@ -1569,20 +1685,21 @@ Preserve any pending input context while sending STRING as a plain prompt."
                        (alist-get 'parts message)))
           (let-alist part
             (cond
-              ((string= .type "tool")
-               (when (string= .state.status "running")
-                 (opencode-session--set-status opencode-session-id "busy")
-                 (opencode-session--schedule-status-poll opencode-session-id))
-               (if (string= .tool "question")
-                   (if (string= .state.status "running")
-                       (opencode--replay-pending-question part)
-                     (opencode-session--insert-completed-question-tool part))
-                 (unless (and (stringp .callID)
-                              (gethash .callID opencode--tool-calls-displayed))
-                   (when (stringp .callID)
-                     (puthash .callID t opencode--tool-calls-displayed))
-                   (opencode--insert-tool-block .tool .state.input))
-                 (opencode--maybe-insert-tool-output part)))
+             ((string= .type "tool")
+              (when (string= .state.status "running")
+                (opencode-session--set-status opencode-session-id "busy")
+                (opencode-session--schedule-status-poll opencode-session-id))
+              (if (string= .tool "question")
+                  (if (string= .state.status "running")
+                      (opencode--replay-pending-question part)
+                    (opencode-session--insert-completed-question-tool part))
+                (unless (and (stringp .callID)
+                             (gethash .callID opencode--tool-calls-displayed)
+                             (opencode-session--tool-part-visible-p part))
+                  (when (stringp .callID)
+                    (puthash .callID t opencode--tool-calls-displayed))
+                  (opencode--insert-tool-block .tool .state.input))
+                (opencode--maybe-insert-tool-output part)))
              (.text
               (when .id
                 (puthash .id .type opencode-part-type)
@@ -1663,21 +1780,21 @@ Preserve any pending input context while sending STRING as a plain prompt."
                                              current-rendered))
                                  (- start-pos (length current-rendered))
                                start-pos))
-                             (visible (buffer-substring-no-properties
-                                       repair-start old-end))
-                             (visible-matches-part
-                              (or (equal visible current-rendered)
-                                  (equal visible rendered)
-                                  (and (not (string-empty-p visible))
-                                       (string-prefix-p visible rendered)
-                                       (>= (length visible)
-                                           (min (length rendered) 80))))))
-                        (when (and visible-matches-part
-                                   (<= (length current) (length .text))
-                                   (not (equal visible rendered)))
-                          (save-excursion
-                            (let ((inhibit-read-only t))
-                              (delete-region repair-start old-end)
+                            (visible (buffer-substring-no-properties
+                                      repair-start old-end))
+                            (visible-matches-part
+                             (or (equal visible current-rendered)
+                                 (equal visible rendered)
+                                 (and (not (string-empty-p visible))
+                                      (string-prefix-p visible rendered)
+                                      (>= (length visible)
+                                          (min (length rendered) 80))))))
+                       (when (and visible-matches-part
+                                  (<= (length current) (length .text))
+                                  (not (equal visible rendered)))
+                         (save-excursion
+                           (let ((inhibit-read-only t))
+                             (delete-region repair-start old-end)
                              (goto-char repair-start)
                              (insert rendered)
                              (set-marker-insertion-type start nil)
@@ -1685,12 +1802,12 @@ Preserve any pending input context while sending STRING as a plain prompt."
                              (set-marker end (point))
                              (when proc-at-end
                                (set-marker (process-mark proc) (point))))))
-                        (when visible-matches-part
-                          (setq anchor end)
-                          (puthash .id .type opencode-part-type)
-                          (puthash .id .text opencode-part-text)
-                          (puthash .id .text opencode-part-replay-text)
-                          (puthash .id (length .text) opencode-part-sent)))
+                       (when visible-matches-part
+                         (setq anchor end)
+                         (puthash .id .type opencode-part-type)
+                         (puthash .id .text opencode-part-text)
+                         (puthash .id .text opencode-part-replay-text)
+                         (puthash .id (length .text) opencode-part-sent)))
                    (when (and anchor
                               (not current)
                               (not (string-empty-p (string-trim .text))))
@@ -1737,7 +1854,42 @@ Preserve any pending input context while sending STRING as a plain prompt."
                                (stringp .text)
                                (not (string-empty-p (string-trim .text))))
                       .text)))
-                (alist-get 'parts message))))
+                (opencode-session--sequence-list
+                 (alist-get 'parts message)))))
+
+(defun opencode-session--message-tool-parts (message)
+  "Return transcript-visible tool parts from MESSAGE."
+  (delq nil
+        (mapcar (lambda (part)
+                  (let-alist part
+                    (when (and (equal .type "tool")
+                               (member .state.status
+                                       '("running" "completed" "error")))
+                      part)))
+                (opencode-session--sequence-list
+                 (alist-get 'parts message)))))
+
+(defun opencode-session--history-validated-table ()
+  "Return the current buffer's history validation table."
+  (unless (hash-table-p opencode-session--history-validated-message-ids)
+    (setq opencode-session--history-validated-message-ids
+          (make-hash-table :test 'equal)))
+  opencode-session--history-validated-message-ids)
+
+(defun opencode-session--history-validated-p (message-id)
+  "Return non-nil when MESSAGE-ID visibility has already been validated."
+  (and (stringp message-id)
+       (gethash message-id (opencode-session--history-validated-table))))
+
+(defun opencode-session--mark-history-validated (message-id)
+  "Remember that MESSAGE-ID is visible in the current transcript."
+  (when (stringp message-id)
+    (puthash message-id t (opencode-session--history-validated-table))))
+
+(defun opencode-session--unmark-history-validated (message-id)
+  "Forget visibility validation for MESSAGE-ID."
+  (when (stringp message-id)
+    (remhash message-id (opencode-session--history-validated-table))))
 
 (defun opencode-session--text-visible-p (text)
   "Return non-nil when TEXT appears to be visible in the current buffer."
@@ -1758,11 +1910,31 @@ Preserve any pending input context while sending STRING as a plain prompt."
                      (goto-char (point-min))
                      (search-forward suffix nil t))))))))))
 
+(defun opencode-session--tool-part-visible-p (part)
+  "Return non-nil when tool PART appears to be visible in the buffer."
+  (let-alist part
+    (let ((text (cond
+                 ((equal .tool "question")
+                  (opencode-session--format-completed-question-tool part))
+                 (t
+                  (opencode--format-tool-call .tool .state.input)))))
+      (when (and (stringp text)
+                 (not (string-empty-p (string-trim text))))
+        (let ((needle (substring-no-properties text)))
+          (save-excursion
+            (save-restriction
+              (widen)
+              (goto-char (point-min))
+              (search-forward needle nil t))))))))
+
 (defun opencode-session--message-visible-p (message)
-  "Return non-nil when MESSAGE's persisted text is visible."
-  (let ((parts (opencode-session--message-text-parts message)))
-    (or (null parts)
-        (cl-every #'opencode-session--text-visible-p parts))))
+  "Return non-nil when MESSAGE's persisted transcript is visible."
+  (let ((text-parts (opencode-session--message-text-parts message))
+        (tool-parts (opencode-session--message-tool-parts message)))
+    (and (or (null text-parts)
+             (cl-every #'opencode-session--text-visible-p text-parts))
+         (or (null tool-parts)
+             (cl-every #'opencode-session--tool-part-visible-p tool-parts)))))
 
 (defun opencode-session--history-messages-by-id (messages)
   "Return a hash table mapping ids to persisted MESSAGES."
@@ -1776,15 +1948,24 @@ Preserve any pending input context while sending STRING as a plain prompt."
   "Reconcile completed assistant MESSAGE against the current buffer."
   (let-alist (alist-get 'info message)
     (when (and (equal .role "assistant") .time.completed)
-      (if (gethash .id opencode-rendered-message-ids)
-          (progn
-            (opencode-session--reconcile-rendered-message-tail message)
-            (unless (opencode-session--message-visible-p message)
-              (remhash .id opencode-rendered-message-ids)
-              (opencode-session--render-complete-assistant-message message)))
-        (opencode-session--render-complete-assistant-message message))
+      (cond
+       ((and (gethash .id opencode-rendered-message-ids)
+             (opencode-session--history-validated-p .id))
+        nil)
+       ((gethash .id opencode-rendered-message-ids)
+        (opencode-session--reconcile-rendered-message-tail message)
+        (if (opencode-session--message-visible-p message)
+            (opencode-session--mark-history-validated .id)
+          (remhash .id opencode-rendered-message-ids)
+          (opencode-session--unmark-history-validated .id)
+          (opencode-session--render-complete-assistant-message message)
+          (opencode-session--mark-history-validated .id)))
+       (t
+        (opencode-session--render-complete-assistant-message message)
+        (opencode-session--mark-history-validated .id)))
       (setf opencode-assistant-messages
-            (assoc-delete-all .id opencode-assistant-messages)))))
+            (assoc-delete-all .id opencode-assistant-messages))
+      (opencode-session--forget-message-stream-state .id))))
 
 (defun opencode-session--apply-history-messages (messages &optional target-ids)
   "Apply persisted MESSAGES to the current session buffer.
@@ -1830,27 +2011,35 @@ messages found in the bounded message table."
      (lambda (message)
        (let-alist (alist-get 'info message)
          (pcase .role
-            ("user"
-             (cond
-              ((opencode-session--message-visible-p message)
-               (puthash .id t opencode-rendered-message-ids)
-               (puthash .id "user" opencode-message-roles))
-              ((gethash .id opencode-rendered-message-ids)
-               (remhash .id opencode-rendered-message-ids)
-               (opencode--replay-user-request message))
-              ((< user-index visible-count)
-               ;; Existing buffers opened before user-message tracking already
-               ;; have these prompts in the comint transcript; mark them to avoid
+           ("user"
+            (cond
+             ((and (gethash .id opencode-rendered-message-ids)
+                   (opencode-session--history-validated-p .id))
+              (puthash .id "user" opencode-message-roles))
+             ((opencode-session--message-visible-p message)
+              (puthash .id t opencode-rendered-message-ids)
+              (puthash .id "user" opencode-message-roles)
+              (opencode-session--mark-history-validated .id))
+             ((gethash .id opencode-rendered-message-ids)
+              (remhash .id opencode-rendered-message-ids)
+              (opencode-session--unmark-history-validated .id)
+              (opencode--replay-user-request message)
+              (opencode-session--mark-history-validated .id))
+             ((< user-index visible-count)
+              ;; Existing buffers opened before user-message tracking already
+              ;; have these prompts in the comint transcript; mark them to avoid
               ;; replaying old history when reconciliation catches up.
               (puthash .id t opencode-rendered-message-ids)
-              (puthash .id "user" opencode-message-roles))
+              (puthash .id "user" opencode-message-roles)
+              (opencode-session--mark-history-validated .id))
              (t
-              (opencode--replay-user-request message)))
+              (opencode--replay-user-request message)
+              (opencode-session--mark-history-validated .id)))
             (setq user-index (1+ user-index)))
-            ("assistant"
-             (when (and assistant-reconcile-enabled .time.completed)
-               (opencode-session--reconcile-completed-assistant-history
-                message))))))
+           ("assistant"
+            (when (and assistant-reconcile-enabled .time.completed)
+              (opencode-session--reconcile-completed-assistant-history
+               message))))))
      messages)))
 
 (defun opencode-session--reconcile-pending (session-id &optional callback)
@@ -2713,7 +2902,8 @@ TYPE is text|reasoning|tool|step-finish"
                           ;; render once even if the running update was missed
                           (member .state.status '("running" "completed" "error"))
                           ;; avoid duplicate display
-                          (not (gethash .callID opencode--tool-calls-displayed))
+                          (not (and (gethash .callID opencode--tool-calls-displayed)
+                                    (opencode-session--tool-part-visible-p part)))
                           ;; skip live questions, handled by question.asked event
                           (not (string= .tool "question")))
                      (puthash .callID t opencode--tool-calls-displayed)
@@ -2954,6 +3144,7 @@ If CALLBACK is given, it will be called with the session after it is initialized
                   opencode-part-region-end (make-hash-table :test 'equal)
                   opencode-part-message (make-hash-table :test 'equal)
                   opencode-message-roles (make-hash-table :test 'equal)
+                  opencode-session--history-validated-message-ids (make-hash-table :test 'equal)
                   opencode-shell-echo (make-hash-table :test 'equal)
                   opencode-session--bootstrapping t
                   opencode-session--queued-events nil
