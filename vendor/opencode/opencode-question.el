@@ -145,7 +145,7 @@
   (opencode-question--toggle-option
    (oref (transient-suffix-object) option-index))
   (unless opencode-question--multiple
-    (opencode-question--do-confirm)))
+    (call-interactively #'opencode-question--do-confirm)))
 
 (transient-define-suffix opencode-question--do-custom ()
   "Type a custom answer."
@@ -161,7 +161,7 @@
         ;; Single-select: clear all option marks
         (dotimes (i (length opencode-question--marked))
           (aset opencode-question--marked i nil))
-        (opencode-question--do-confirm)))))
+        (call-interactively #'opencode-question--do-confirm)))))
 
 (defun opencode-question--confirm-pre-command ()
   "Pre-command function for confirm: exit if selection is non-empty, else stay."
@@ -257,7 +257,7 @@ _CHILDREN is the statically-defined children, which are ignored."
         (aset opencode-question--labels i (alist-get 'label opt))
         (aset opencode-question--descriptions i (alist-get 'description opt))))
     (add-hook 'transient-exit-hook #'opencode-question--on-exit)
-    (opencode-question--transient)))
+    (call-interactively #'opencode-question--transient)))
 
 (defun opencode-question--prompt (question-id questions)
   "Prompt user to answer QUESTIONS and reply or reject to QUESTION-ID.
@@ -289,29 +289,43 @@ On confirm, replies to the server.  On reject or dismiss, rejects."
       (opencode--output (opencode--format-questions questions))
       (opencode--output "\n"))))
 
-(defun opencode--queue-questions (buffer question-id questions)
-  "Queue QUESTION-ID with QUESTIONS in BUFFER and prompt if active."
-  (opencode--output-questions buffer questions)
-  (if (opencode--buffer-active-p buffer)
-      (opencode--prompt-questions question-id questions)
-    (opencode--toast-show `((title . "OpenCode Questions")
-                            (message . ,(alist-get 'question (aref questions 0)))
-                            (variant . "info")))
+(defun opencode--queue-questions (buffer question-id questions &optional tool)
+  "Queue QUESTION-ID with QUESTIONS in BUFFER and prompt if active.
+TOOL is optional backend metadata linking the question to a tool call."
+  (let (already-pending already-displayed)
     (with-current-buffer buffer
-      (setq opencode-session-pending-questions
-            (cons question-id questions)))))
+      (opencode-session--record-question-tool question-id tool)
+      (setq already-pending
+            (equal (car-safe opencode-session-pending-questions) question-id)
+            already-displayed
+            (and (stringp question-id)
+                 (gethash question-id opencode--displayed-question-ids)))
+      (unless already-pending
+        (setq opencode-session-pending-questions
+               (cons question-id questions))))
+    (unless (or already-pending already-displayed)
+      (with-current-buffer buffer
+        (when (stringp question-id)
+          (puthash question-id t opencode--displayed-question-ids)))
+      (opencode--output-questions buffer questions)
+      (if (opencode--buffer-active-p buffer)
+          (opencode--prompt-questions question-id questions)
+        (opencode--toast-show `((title . "OpenCode Questions")
+                                (message . ,(alist-get 'question (aref questions 0)))
+                                (variant . "info")))))))
 
-(defun opencode--question-request (question-id session-id questions)
+(defun opencode--question-request (question-id session-id questions &optional tool)
   "Handle QUESTION-ID with QUESTIONS for SESSION-ID.
+TOOL is optional backend metadata linking the question to a tool call.
 Ensures the session buffer exists so pending questions are not dropped."
   (if-let (buffer (gethash session-id opencode-session-buffers))
-      (opencode--queue-questions buffer question-id questions)
+      (opencode--queue-questions buffer question-id questions tool)
     (opencode-api-session (session-id)
         session
       (push session opencode-alerted-sessions)
       (opencode-open-session session)
       (when-let (buffer (gethash session-id opencode-session-buffers))
-        (opencode--queue-questions buffer question-id questions)))))
+        (opencode--queue-questions buffer question-id questions tool)))))
 
 (provide 'opencode-question)
 ;;; opencode-question.el ends here

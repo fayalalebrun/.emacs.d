@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'opencode-common)
+(require 'opencode-record)
 (require 'plz)
 (require 'json)
 
@@ -45,16 +46,17 @@ and saving to CURRENT-BUFFER while running BODY."
       `(let ((,current-buffer (current-buffer))
              (,saved-path ,path)
              (,saved-data ,data))
-         (when opencode-api-log-max-lines
-           (with-current-buffer (get-buffer-create "*opencode-api-log*")
+          (when opencode-api-log-max-lines
+            (with-current-buffer (get-buffer-create "*opencode-api-log*")
              (save-excursion
                (goto-char (point-max))
                (insert "REQUEST: " ,saved-path "\n")
                (when ,saved-data
                  (insert "REQUEST BODY:")
                  (pp ,saved-data (current-buffer)))
-               (opencode--truncate-at-max-lines opencode-api-log-max-lines))))
-         (plz ',method (concat opencode-api-url ,saved-path)
+                (opencode--truncate-at-max-lines opencode-api-log-max-lines))))
+          (opencode-record--api-request ',method ,saved-path ,saved-data)
+          (plz ',method (concat opencode-api-url ,saved-path)
            :as (lambda () (unless (string-empty-p (buffer-string))
                        (json-parse-buffer :array-type 'list
                                           :object-type 'alist)))
@@ -64,21 +66,23 @@ and saving to CURRENT-BUFFER while running BODY."
             ,@(when data
                 `(:body (opencode-api--encode-data ,saved-data)))
            :then (lambda (,result)
-                   (when opencode-api-log-max-lines
-                     (with-current-buffer
-                         (get-buffer-create "*opencode-api-log*")
-                       (save-excursion
-                         (goto-char (point-max))
-                         (insert "RESPONSE: ")
-                         (pp ,result (current-buffer)))))
-                   (let ((,return-var ,result))
+                    (when opencode-api-log-max-lines
+                      (with-current-buffer
+                          (get-buffer-create "*opencode-api-log*")
+                        (save-excursion
+                          (goto-char (point-max))
+                          (insert "RESPONSE: ")
+                          (pp ,result (current-buffer)))))
+                    (opencode-record--api-response ',method ,saved-path ,result)
+                    (let ((,return-var ,result))
                      (if (buffer-live-p ,current-buffer)
                          (with-current-buffer ,current-buffer
                            ,@body)
                        ,@body)))
            :else (lambda (response)
-                   (let ((error-msg (format "error requesting %s: %s" ,saved-path response)))
-                     (when opencode-api-log-max-lines
+                    (let ((error-msg (format "error requesting %s: %s" ,saved-path response)))
+                      (opencode-record--api-error ',method ,saved-path response)
+                      (when opencode-api-log-max-lines
                        (with-current-buffer
                            (get-buffer-create "*opencode-api-log*")
                          (save-excursion
@@ -177,11 +181,12 @@ body when it normally would (POST PATCH)."
      (post fork-session "/session/%s/fork")
      (post revert-message "/session/%s/revert")
      (post nodata unrevert-all "/session/%s/unrevert")
-     (post respond-permission-request "/session/%s/permissions/%s")
-     (post nodata share-session "/session/%s/share")
-     (delete unshare-session "/session/%s/share")
-     (post execute-command "/session/%s/command")
-     (post execute-shell "/session/%s/shell")
+      (post respond-permission-request "/session/%s/permissions/%s")
+      (post nodata share-session "/session/%s/share")
+      (delete unshare-session "/session/%s/share")
+      (post summarize-session "/session/%s/summarize")
+      (post execute-command "/session/%s/command")
+      (post execute-shell "/session/%s/shell")
      (post reply-questions "/question/%s/reply")
      (post nodata reject-questions "/question/%s/reject")
      (commands "/command")

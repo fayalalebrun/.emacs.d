@@ -44,7 +44,9 @@ BODY is evaluated inside `(let-alist tool-args ...)'."
 
 (opencode-define-tool-formatter "apply_patch"
     (concat "apply_patch:\n"
-            (opencode--format-apply-patch .patchText)))
+            (if (stringp .patchText)
+                (opencode--format-apply-patch .patchText)
+              "[missing patchText]")))
 
 (opencode-define-tool-formatter "write"
     (format "write %s" .filePath))
@@ -171,11 +173,11 @@ BODY is evaluated inside `(let-alist tool-args ...)'."
       "<missing patch text>"
     (opencode--fontify-diff-string
      (with-temp-buffer
-     (insert patch-text)
-     (goto-char (point-min))
-     (while (re-search-forward "^\\*\\*\\* \\(?:Begin\\|End\\) Patch\\n?" nil t)
-       (replace-match "" t t))
-     (goto-char (point-min))
+       (insert patch-text)
+       (goto-char (point-min))
+       (while (re-search-forward "^\\*\\*\\* \\(?:Begin\\|End\\) Patch\\n?" nil t)
+         (replace-match "" t t))
+       (goto-char (point-min))
       (while (not (eobp))
         (cond
         ((looking-at opencode--apply-patch-file-header-regexp)

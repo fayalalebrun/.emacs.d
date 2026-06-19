@@ -40,7 +40,7 @@
 (defvar opencode-providers nil
   "List of available providers and models.")
 
-(defvar opencode-part-type (make-hash-table :test 'equal)
+(defvar-local opencode-part-type (make-hash-table :test 'equal)
   "Mapping of part id's to their type.")
 
 (defvar-local opencode--extra-parts nil
@@ -75,6 +75,11 @@ for title, message, variant (error/warning/info/success), and duration"
 
 (defcustom opencode-show-tool-output nil
   "Show output of tool calls."
+  :type 'boolean
+  :group 'opencode)
+
+(defcustom opencode-show-reasoning t
+  "Show assistant reasoning parts."
   :type 'boolean
   :group 'opencode)
 
