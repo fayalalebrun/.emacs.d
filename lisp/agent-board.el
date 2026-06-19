@@ -60,6 +60,9 @@
 (defvar agent-board-status-cache-refresh-interval 3
   "Seconds before OpenCode status cache entries are considered stale.")
 
+(defvar agent-board-async-pending-timeout 10
+  "Seconds before an in-flight async board refresh is treated as stale.")
+
 (defvar agent-board--pinned-repos nil
   "Buffer-local list of repo paths to always show.")
 
@@ -95,6 +98,9 @@
 
 (defvar agent-board--status-pending (make-hash-table :test 'equal)
   "Map worktree path to in-flight OpenCode status refresh state.")
+
+(defvar agent-board--opencode-session-status-cache (make-hash-table :test 'equal)
+  "Map OpenCode session ids to statuses last observed by the board.")
 
 (defvar agent-board--process-snapshot-cache nil
   "Cached process snapshot for memory display.")
@@ -137,6 +143,30 @@ When nil, new sessions keep OpenCode's default primary agent."
   (puthash key (list :value value :at (agent-board--now)) table)
   value)
 
+(defun agent-board--pending-active-p (table key)
+  "Return non-nil when TABLE has a fresh pending refresh for KEY."
+  (let ((started-at (gethash key table)))
+    (cond
+     ((numberp started-at)
+      (if (<= (- (agent-board--now) started-at)
+              agent-board-async-pending-timeout)
+          t
+        (remhash key table)
+        nil))
+     (started-at
+      ;; Older versions stored t here.  Treat it as stale so a failed async
+      ;; callback cannot block status refreshes forever after reloading.
+      (remhash key table)
+      nil))))
+
+(defun agent-board--pending-start (table key)
+  "Record that TABLE has started an async refresh for KEY."
+  (puthash key (agent-board--now) table))
+
+(defun agent-board--pending-finish (table key)
+  "Record that TABLE has finished its async refresh for KEY."
+  (remhash key table))
+
 (defun agent-board--visible-p (buffer)
   "Return non-nil when BUFFER is visible in a window."
   (and (buffer-live-p buffer)
@@ -150,14 +180,14 @@ When nil, new sessions keep OpenCode's default primary agent."
         (run-with-idle-timer
          agent-board-redraw-debounce-delay nil
          (lambda ()
-            (setq agent-board--redraw-timer nil)
-            (dolist (buf (buffer-list))
-              (when (and (buffer-live-p buf)
-                         (agent-board--visible-p buf))
-                (with-current-buffer buf
-                  (when (derived-mode-p 'agent-board-mode)
-                    (ignore-errors
-                      (agent-board-refresh))))))))))
+           (setq agent-board--redraw-timer nil)
+           (dolist (buf (buffer-list))
+             (when (and (buffer-live-p buf)
+                        (agent-board--visible-p buf))
+               (with-current-buffer buf
+                 (when (derived-mode-p 'agent-board-mode)
+                   (ignore-errors
+                     (agent-board-refresh))))))))))
 
 (defun agent-board--refresh-buffer-if-needed (buf)
   "Refresh board BUF when it is live, visible, and in board mode."
@@ -171,6 +201,28 @@ When nil, new sessions keep OpenCode's default primary agent."
 (defun agent-board--process-live-p (proc)
   "Return non-nil when PROC is a live process."
   (and proc (process-live-p proc)))
+
+(defun agent-board--opencode-live-connection-p ()
+  "Return non-nil when OpenCode already has a live event connection.
+This intentionally avoids `opencode--connected-p', which performs a
+synchronous health probe.  Agent-board refreshes can run on a timer, so using
+the live SSE process as the fast path avoids blocking Emacs on every board
+status/session refresh."
+  (and (boundp 'opencode-api-url)
+       opencode-api-url
+       (boundp 'opencode--event-subscription)
+       (process-live-p opencode--event-subscription)))
+
+(defun agent-board--with-opencode (callback)
+  "Run CALLBACK once OpenCode is connected."
+  (condition-case err
+      (if (agent-board--opencode-live-connection-p)
+          (funcall callback)
+        (opencode-autoconnect callback))
+    (user-error
+     (if (string= (error-message-string err) "Already connected")
+         (funcall callback)
+       (signal (car err) (cdr err))))))
 
 (defun agent-board--start-process (name buffer directory command sentinel)
   "Start async COMMAND in DIRECTORY using BUFFER and SENTINEL."
@@ -345,18 +397,27 @@ Starts an async refresh when needed.
                     (agent-board-workspace-buffer ws)
                     sessions)
                    (agent-board-workspace-buffer ws)))
-         (server-status (agent-board--workspace-status-from-server
-                         worktree)))
+         (status-snapshot (agent-board--workspace-status-snapshot worktree))
+         (status-known (car-safe status-snapshot))
+         (server-status (and status-snapshot
+                             (agent-board--status-type-from-map
+                              (cdr status-snapshot)))))
     (cond
+     ((member server-status '("busy" "waiting" "starting"))
+      server-status)
      ((and buf (buffer-live-p buf))
       (with-current-buffer buf
         (let ((local-status (and (boundp 'opencode-session-status)
                                  opencode-session-status)))
-          (if (member server-status '("busy" "waiting" "starting"))
-              server-status
+          (cond
+           ((member local-status '("busy" "waiting" "starting"))
+            local-status)
+           ((and status-known (null server-status))
+            "idle")
+           (t
             (or local-status
                 server-status
-                "no-agent")))))
+                "no-agent"))))))
      (t "no-agent"))))
 
 (defun agent-board--status-face (status)
@@ -479,16 +540,28 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
             (format "%.1fk" (/ tokens 1000.0))
           "-")))))
 
+(defun agent-board--buffer-directory (buf)
+  "Return BUF's stable session directory or `default-directory'."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (if (fboundp 'opencode-session--directory)
+          (opencode-session--directory)
+        (let ((session-dir (and (boundp 'opencode-session-directory)
+                                (stringp opencode-session-directory)
+                                (file-directory-p opencode-session-directory)
+                                opencode-session-directory)))
+          (or session-dir default-directory))))))
+
 (defun agent-board--find-buffer-for-worktree (dir)
   "Return the live OpenCode session buffer for DIR, or nil."
   (let ((target (file-truename (expand-file-name dir))))
     (cl-find-if
      (lambda (buf)
        (and (buffer-live-p buf)
-            (let ((buf-dir (buffer-local-value 'default-directory buf)))
+            (let ((buf-dir (agent-board--buffer-directory buf)))
               (and buf-dir
                    (file-directory-p buf-dir)
-                    (file-equal-p (file-truename buf-dir) target)))))
+                   (file-equal-p (file-truename buf-dir) target)))))
      (agent-board--agent-buffers))))
 
 (defun agent-board--buffer-session-id (buf)
@@ -507,12 +580,15 @@ SNAPSHOT should come from `agent-board--ensure-process-snapshot'."
 
 When SESSIONS is nil, trust a live local OpenCode buffer.  Session data is
 loaded asynchronously, and treating unknown membership as dead makes visible
-buffers flicker to no-agent while the cache is empty or refreshing."
+buffers flicker to no-agent while the cache is empty or refreshing.  Also
+trust a live buffer with a session id when the async session cache is stale or
+transiently missing that id."
   (and buf
        (buffer-live-p buf)
-       (or (null sessions)
-           (member (agent-board--buffer-session-id buf)
-                   (agent-board--session-ids sessions)))))
+       (let ((session-id (agent-board--buffer-session-id buf)))
+         (or (null sessions)
+             (member session-id (agent-board--session-ids sessions))
+             session-id))))
 
 (defun agent-board--filter-sessions-for-directory (sessions dir)
   "Return SESSIONS whose directory matches DIR."
@@ -535,7 +611,7 @@ buffers flicker to no-agent while the cache is empty or refreshing."
     (cl-labels
         ((fetch (request-dir fallback-p)
            (let ((default-directory request-dir))
-             (opencode-autoconnect
+             (agent-board--with-opencode
               (lambda ()
                 (let ((default-directory request-dir))
                   (opencode-api-sessions sessions
@@ -553,7 +629,7 @@ buffers flicker to no-agent while the cache is empty or refreshing."
   "Call ON-SUCCESS with OpenCode session statuses for DIR."
   (let ((target (file-name-as-directory (expand-file-name dir))))
     (let ((default-directory target))
-      (opencode-autoconnect
+      (agent-board--with-opencode
        (lambda ()
          (let ((default-directory target))
            (opencode-api-sessions-status statuses
@@ -569,19 +645,26 @@ buffers flicker to no-agent while the cache is empty or refreshing."
          (entry (gethash key agent-board--session-cache)))
     (when (and (not (agent-board--cache-fresh-p entry
                                                 agent-board-session-cache-refresh-interval))
-               (not (gethash key agent-board--session-pending)))
-      (puthash key t agent-board--session-pending)
-      (agent-board--directory-sessions
-       key
-       (lambda (sessions)
-         (agent-board--cache-put
-          agent-board--session-cache key
-          (sort (copy-sequence sessions)
-                (lambda (a b)
-                  (> (agent-board--session-updated-seconds a)
-                     (agent-board--session-updated-seconds b)))))
-         (remhash key agent-board--session-pending)
-         (agent-board--schedule-redraw))))
+               (not (agent-board--pending-active-p
+                     agent-board--session-pending key)))
+      (agent-board--pending-start agent-board--session-pending key)
+      (condition-case err
+          (agent-board--directory-sessions
+           key
+           (lambda (sessions)
+             (unwind-protect
+                 (agent-board--cache-put
+                  agent-board--session-cache key
+                  (sort (copy-sequence sessions)
+                        (lambda (a b)
+                          (> (agent-board--session-updated-seconds a)
+                             (agent-board--session-updated-seconds b)))))
+               (agent-board--pending-finish agent-board--session-pending key)
+               (agent-board--schedule-redraw))))
+        (error
+         (agent-board--pending-finish agent-board--session-pending key)
+         (message "agent-board session refresh failed for %s: %s"
+                  key (error-message-string err)))))
     (agent-board--cache-value agent-board--session-cache key)))
 
 (defun agent-board--workspace-sessions (worktree)
@@ -596,14 +679,21 @@ buffers flicker to no-agent while the cache is empty or refreshing."
          (entry (gethash key agent-board--status-cache)))
     (when (and (not (agent-board--cache-fresh-p entry
                                                 agent-board-status-cache-refresh-interval))
-               (not (gethash key agent-board--status-pending)))
-      (puthash key t agent-board--status-pending)
-      (agent-board--directory-session-statuses
-       key
-       (lambda (statuses)
-         (agent-board--cache-put agent-board--status-cache key statuses)
-         (remhash key agent-board--status-pending)
-         (agent-board--schedule-redraw))))
+               (not (agent-board--pending-active-p
+                     agent-board--status-pending key)))
+      (agent-board--pending-start agent-board--status-pending key)
+      (condition-case err
+          (agent-board--directory-session-statuses
+           key
+           (lambda (statuses)
+             (unwind-protect
+                 (agent-board--cache-put agent-board--status-cache key statuses)
+               (agent-board--pending-finish agent-board--status-pending key)
+               (agent-board--schedule-redraw))))
+        (error
+         (agent-board--pending-finish agent-board--status-pending key)
+         (message "agent-board status refresh failed for %s: %s"
+                  key (error-message-string err)))))
     (agent-board--cache-value agent-board--status-cache key)))
 
 (defun agent-board--workspace-status-map (worktree)
@@ -612,13 +702,41 @@ buffers flicker to no-agent while the cache is empty or refreshing."
        (file-directory-p worktree)
        (agent-board--ensure-worktree-statuses worktree)))
 
+(defun agent-board--workspace-status-snapshot (worktree)
+  "Return a cons of (KNOWN . STATUSES) for WORKTREE.
+KNOWN is non-nil only when the status cache has a fresh backend response."
+  (when (and worktree
+             (file-directory-p worktree))
+    (let* ((key (file-name-as-directory (file-truename worktree)))
+           (entry (progn
+                    (agent-board--ensure-worktree-statuses worktree)
+                    (gethash key agent-board--status-cache))))
+      (when (agent-board--cache-fresh-p
+             entry agent-board-status-cache-refresh-interval)
+        (cons t (plist-get entry :value))))))
+
+(defun agent-board--status-type-from-map (statuses)
+  "Return the first status type from STATUSES."
+  (cond
+   ((hash-table-p statuses)
+    (catch 'status
+      (maphash (lambda (_session-id value)
+                 (let ((type (cond
+                              ((hash-table-p value) (gethash "type" value))
+                              ((listp value) (alist-get 'type value)))))
+                   (when type
+                     (throw 'status type))))
+               statuses)
+      nil))
+   ((listp statuses)
+    (let* ((first (car statuses))
+           (value (cdr first)))
+      (and value (alist-get 'type value))))))
+
 (defun agent-board--workspace-status-from-server (worktree)
   "Return the current server status for WORKTREE, or nil."
-  (let ((statuses (agent-board--workspace-status-map worktree)))
-    (when statuses
-      (let* ((first (car statuses))
-             (value (cdr first)))
-        (and value (alist-get 'type value))))))
+  (when-let ((snapshot (agent-board--workspace-status-snapshot worktree)))
+    (agent-board--status-type-from-map (cdr snapshot))))
 
 (defun agent-board--apply-default-agent (buf)
   "Apply `agent-board-opencode-default-agent-name' to OpenCode BUF."
@@ -638,47 +756,48 @@ buffers flicker to no-agent while the cache is empty or refreshing."
   "Start a new OpenCode session in DIR, optionally with TITLE."
   (let ((target (file-name-as-directory (expand-file-name dir))))
     (let ((default-directory target))
-      (opencode-autoconnect
+      (agent-board--with-opencode
        (lambda ()
          (let ((default-directory target))
-           (opencode-process-events target)
-           (opencode-api-create-session (if title
-                                            `((title . ,title))
-                                          (make-hash-table))
-               session
-             (opencode-open-session session)
-             (agent-board--apply-default-agent
-              (gethash (alist-get 'id session) opencode-session-buffers)))))))))
+           (apply #'opencode-new-session
+                  (append
+                   (when title
+                     (list :title title))
+                   (list :callback
+                         (lambda (session)
+                           (agent-board--apply-default-agent
+                            (gethash (alist-get 'id session)
+                                     opencode-session-buffers))))))))))))
 
 (defun agent-board--open-workspace (dir)
   "Open the most recent OpenCode session for DIR or the project view."
   (let ((target (file-name-as-directory (expand-file-name dir))))
-    (let* ((sessions (agent-board--workspace-sessions target))
-           (buffer (and sessions
-                        (agent-board--live-server-buffer-p
-                         (agent-board--find-buffer-for-worktree target)
-                         sessions)
-                        (agent-board--find-buffer-for-worktree target))))
-      (if buffer
-        (progn
-          (opencode-process-events target)
-          (pop-to-buffer buffer))
-        (if sessions
-            (progn
-              (opencode-process-events target)
-              (opencode-open-session (car sessions)))
-          (agent-board--directory-sessions
-           target
-           (lambda (fetched-sessions)
-             (if fetched-sessions
-                 (progn
-                   (opencode-process-events target)
-                   (opencode-open-session
-                    (car (sort (copy-sequence fetched-sessions)
-                               (lambda (a b)
-                                 (> (or (map-nested-elt a '(time updated)) 0)
-                                    (or (map-nested-elt b '(time updated)) 0)))))))
-                (opencode-open-project target)))))))))
+    (agent-board--with-opencode
+     (lambda ()
+       (let* ((sessions (agent-board--workspace-sessions target))
+              (buffer (and sessions
+                           (agent-board--live-server-buffer-p
+                            (agent-board--find-buffer-for-worktree target)
+                            sessions)
+                           (agent-board--find-buffer-for-worktree target))))
+         (cond
+          (buffer
+           (pop-to-buffer buffer))
+          (sessions
+           (let ((default-directory target))
+             (opencode-open-session (car sessions))))
+          (t
+           (agent-board--directory-sessions
+            target
+            (lambda (fetched-sessions)
+              (let ((default-directory target))
+                (if fetched-sessions
+                    (opencode-open-session
+                     (car (sort (copy-sequence fetched-sessions)
+                                (lambda (a b)
+                                  (> (or (map-nested-elt a '(time updated)) 0)
+                                     (or (map-nested-elt b '(time updated)) 0))))))
+                  (opencode-open-project target))))))))))))
 
 (defun agent-board--mark-session-activity (&optional buffer)
   "Record activity time for OpenCode BUFFER or the current buffer."
@@ -695,42 +814,46 @@ buffers flicker to no-agent while the cache is empty or refreshing."
 (defun agent-board--invalidate-opencode-status-cache-for-buffer (buffer)
   "Invalidate cached OpenCode status data for BUFFER's worktree."
   (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when (and (boundp 'default-directory)
-                 default-directory
-                 (file-directory-p default-directory))
-        (let ((key (file-name-as-directory (file-truename default-directory))))
+    (when-let ((directory (agent-board--buffer-directory buffer)))
+      (when (file-directory-p directory)
+        (let ((key (file-name-as-directory (file-truename directory))))
           (remhash key agent-board--status-cache))))))
 
-(defun agent-board--after-opencode-status-changed (session-id _status)
-  "Refresh visible boards after OpenCode SESSION-ID changes status."
+(defun agent-board--after-opencode-status-changed (session-id status)
+  "Refresh visible boards after OpenCode SESSION-ID changes status.
+Do not update `agent-board--last-activity-time' here: status polling can run
+many times per second while a session is busy, and would otherwise keep the
+Last column pinned at 0s even when no output is arriving."
   (when-let ((buffer (gethash session-id opencode-session-buffers)))
-    (agent-board--mark-session-activity buffer)
-    (agent-board--invalidate-opencode-status-cache-for-buffer buffer)
-    (agent-board--schedule-redraw)))
+    (let ((previous (gethash session-id
+                             agent-board--opencode-session-status-cache
+                             :agent-board--unknown-status)))
+      (unless (equal previous status)
+        (puthash session-id status agent-board--opencode-session-status-cache)
+        (agent-board--invalidate-opencode-status-cache-for-buffer buffer)
+        (agent-board--schedule-redraw)))))
 
-(defun agent-board--after-opencode-message-data (raw-data)
-  "Invalidate board caches for session lifecycle events in RAW-DATA."
-  (when (and (stringp raw-data)
-             (string-match-p
-              (rx "\"type\":"
-                  (or "\"session.created\""
-                      "\"session.updated\""
-                      "\"session.deleted\""))
-              raw-data))
+(defun agent-board--after-opencode-message (data)
+  "Invalidate board caches for session lifecycle events in decoded DATA."
+  (when (memq (intern-soft (alist-get 'type data))
+              '(session.created session.updated session.deleted))
     (clrhash agent-board--session-cache)
     (clrhash agent-board--status-cache)
     (agent-board--schedule-redraw)))
 
-(defun agent-board--after-opencode-update-part (&rest _)
-  "Track OpenCode activity in the current session buffer."
-  (agent-board--mark-session-activity (current-buffer)))
+(defun agent-board--after-opencode-update-part (part &rest _)
+  "Track OpenCode activity for the session buffer named by PART."
+  (let-alist part
+    (if-let ((buffer (and .sessionID
+                          (gethash .sessionID opencode-session-buffers))))
+        (agent-board--mark-session-activity buffer)
+      (agent-board--mark-session-activity (current-buffer)))))
 
 (defun agent-board--discover-repos ()
   "Return alist of (REPO-KEY . AI-BUFS) for repos with agent sessions."
   (let ((repos (make-hash-table :test 'equal)))
     (dolist (buf (agent-board--agent-buffers))
-      (let* ((dir (buffer-local-value 'default-directory buf))
+      (let* ((dir (agent-board--buffer-directory buf))
              (key (agent-board--repo-key dir)))
         (when key
           (puthash key (cons buf (gethash key repos)) repos))))
@@ -747,8 +870,7 @@ buffers flicker to no-agent while the cache is empty or refreshing."
   (let ((seen (make-hash-table :test 'equal))
         result)
     (dolist (buf ai-bufs)
-      (let ((dir (and (buffer-live-p buf)
-                      (buffer-local-value 'default-directory buf))))
+      (let ((dir (agent-board--buffer-directory buf)))
         (when (and dir (file-directory-p dir))
           (let ((path (file-truename dir)))
             (unless (gethash path seen)
@@ -790,20 +912,20 @@ buffers flicker to no-agent while the cache is empty or refreshing."
               (let ((raw-path (car wt)))
                 (when (file-directory-p raw-path)
                   (let* ((path (file-truename raw-path))
-                          (branch (or (nth 2 wt) "(detached)"))
-                          (sessions (agent-board--workspace-sessions path))
-                          (matched-buf
-                           (cl-find-if
-                            (lambda (buf)
-                              (and (agent-board--live-server-buffer-p buf sessions)
-                                   (let ((dir (and (buffer-live-p buf)
-                                                   (buffer-local-value 'default-directory buf))))
-                                     (and dir
-                                          (file-directory-p dir)
-                                          (file-equal-p dir path)))))
-                            ai-bufs)))
-                     (push (make-agent-board-workspace
-                            :project project
+                         (branch (or (nth 2 wt) "(detached)"))
+                         (sessions (agent-board--workspace-sessions path))
+                         (matched-buf
+                          (cl-find-if
+                           (lambda (buf)
+                             (let ((dir (agent-board--buffer-directory buf)))
+                               (and dir
+                                    (file-directory-p dir)
+                                    (file-equal-p dir path)
+                                    (agent-board--live-server-buffer-p
+                                     buf sessions))))
+                           ai-bufs)))
+                    (push (make-agent-board-workspace
+                           :project project
                            :toplevel toplevel
                            :branch branch
                            :worktree path
@@ -828,37 +950,37 @@ buffers flicker to no-agent while the cache is empty or refreshing."
         (snapshot (agent-board--ensure-process-snapshot)))
     (clrhash agent-board--workspaces)
     (mapcar
-      (lambda (ws)
-        (let* ((status (agent-board--status ws))
-               (path (agent-board-workspace-worktree ws))
-               (buf (agent-board-workspace-buffer ws))
-               (sessions (agent-board--workspace-sessions path))
-               (proc (agent-board--live-process buf))
-               (pid (and proc (process-id proc)))
-               (last-activity (and buf
-                                   (buffer-live-p buf)
-                                   (buffer-local-value 'agent-board--last-activity-time buf)))
-               (last-session-time (and (not last-activity)
-                                       sessions
-                                       (seconds-to-time
-                                        (agent-board--session-updated-seconds
-                                         (car sessions)))))
-               (memory (agent-board--format-rss-kib
-                        (agent-board--process-rss-kib proc snapshot))))
+     (lambda (ws)
+       (let* ((status (agent-board--status ws))
+              (path (agent-board-workspace-worktree ws))
+              (buf (agent-board-workspace-buffer ws))
+              (sessions (agent-board--workspace-sessions path))
+              (proc (agent-board--live-process buf))
+              (pid (and proc (process-id proc)))
+              (last-activity (and buf
+                                  (buffer-live-p buf)
+                                  (buffer-local-value 'agent-board--last-activity-time buf)))
+              (last-session-time (and (not last-activity)
+                                      sessions
+                                      (seconds-to-time
+                                       (agent-board--session-updated-seconds
+                                        (car sessions)))))
+              (memory (agent-board--format-rss-kib
+                       (agent-board--process-rss-kib proc snapshot))))
          (puthash path ws agent-board--workspaces)
          (list path
-                (vector
-                 (propertize status 'face (agent-board--status-face status))
-                  (agent-board-workspace-project ws)
-                  (or (agent-board-workspace-task ws) "-")
-                  (agent-board-workspace-branch ws)
-                  (if pid (number-to-string pid) "-")
-                  (if (string= status "busy")
-                      (agent-board--format-age (or last-activity last-session-time))
-                    "")
-                  memory
-                  (agent-board--format-tokens-used buf)
-                  (abbreviate-file-name path)))))
+               (vector
+                (propertize status 'face (agent-board--status-face status))
+                (agent-board-workspace-project ws)
+                (or (agent-board-workspace-task ws) "-")
+                (agent-board-workspace-branch ws)
+                (if pid (number-to-string pid) "-")
+                (if (string= status "busy")
+                    (agent-board--format-age (or last-activity last-session-time))
+                  "")
+                memory
+                (agent-board--format-tokens-used buf)
+                (abbreviate-file-name path)))))
      workspaces)))
 
 (defun agent-board--workspace-at-point ()
@@ -1106,7 +1228,7 @@ buffers flicker to no-agent while the cache is empty or refreshing."
     (advice-add 'opencode-session--message-updated :after
                 #'agent-board--after-opencode-message-updated))
   (unless (advice-member-p #'agent-board--after-opencode-update-part
-                            #'opencode-session--update-part)
+                           #'opencode-session--update-part)
     (advice-add 'opencode-session--update-part :after
                 #'agent-board--after-opencode-update-part))
   (unless (advice-member-p #'agent-board--after-opencode-status-changed
@@ -1115,10 +1237,10 @@ buffers flicker to no-agent while the cache is empty or refreshing."
                 #'agent-board--after-opencode-status-changed)))
 
 (with-eval-after-load 'opencode
-  (unless (advice-member-p #'agent-board--after-opencode-message-data
-                           #'opencode--handle-message-data)
-    (advice-add 'opencode--handle-message-data :after
-                #'agent-board--after-opencode-message-data)))
+  (unless (advice-member-p #'agent-board--after-opencode-message
+                           #'opencode--handle-message)
+    (advice-add 'opencode--handle-message :after
+                #'agent-board--after-opencode-message)))
 
 (defun agent-board--refresh-timer-callback (board-buf)
   "Refresh BOARD-BUF if it is alive and visible."
