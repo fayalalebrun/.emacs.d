@@ -733,13 +733,18 @@ Some packages/modes can transiently remap these during startup."
              opencode-visit-last-idle
              opencode-add-file-dwim
              opencode-add-region
-             opencode-add-buffer-dwim)
-  :bind (("C-c o" . opencode))
+             opencode-add-buffer-dwim
+             opencode-insert-line-reference)
+  :bind (("C-c o" . opencode)
+         ("C-c O" . opencode-insert-line-reference))
   :config
-  (setq opencode-port 4098)
+  (setq opencode-host "127.0.0.1"
+        opencode-port 4097
+        opencode-auto-start-server nil)
   (setq opencode-worktree-directory
         (expand-file-name "var/opencode/worktrees/" user-emacs-directory))
-  (make-directory opencode-worktree-directory t))
+  (make-directory opencode-worktree-directory t)
+  (global-set-key (kbd "C-c O") #'opencode-insert-line-reference))
 
 (use-package agent-board
   :load-path "lisp"
@@ -747,25 +752,15 @@ Some packages/modes can transiently remap these during startup."
   :commands (agent-board)
   :bind (("C-c w" . agent-board)))
 
-(with-eval-after-load 'opencode-sessions
-  (defun my-opencode--slash-command-candidates ()
-    "Return slash-command completion candidates with safe descriptions."
-    (cl-loop for command in opencode-slash-commands
-             for name = (alist-get 'name command)
-             when (stringp name)
-             collect (list name name (or (alist-get 'description command) ""))))
-  (defun my-opencode-insert-slash-command-a (orig-fn &rest args)
-    "Handle slash commands with missing descriptions gracefully."
-    (if (= (point) (cdr comint-last-prompt))
-        (let ((command (opencode--annotated-completion
-                        "Slash command: "
-                        (my-opencode--slash-command-candidates))))
-          (insert (concat "/" command)))
-      (apply orig-fn args)))
-  (unless (advice-member-p #'my-opencode-insert-slash-command-a
-                           #'opencode-insert-slash-command)
-    (advice-add 'opencode-insert-slash-command :around
-                #'my-opencode-insert-slash-command-a)))
+;; Remove obsolete slash-command advice from older config versions.  Upstream
+;; now handles nil slash-command descriptions in `opencode--annotated-completion'.
+(when (fboundp 'my-opencode-insert-slash-command-a)
+  (when (fboundp 'opencode-insert-slash-command)
+    (advice-remove 'opencode-insert-slash-command
+                   #'my-opencode-insert-slash-command-a))
+  (fmakunbound 'my-opencode-insert-slash-command-a))
+(when (fboundp 'my-opencode--slash-command-candidates)
+  (fmakunbound 'my-opencode--slash-command-candidates))
 
 (use-package ai-code
   :quelpa (ai-code :fetcher github :repo "tninja/ai-code-interface.el")
@@ -829,21 +824,37 @@ Some packages/modes can transiently remap these during startup."
   (shell-command-x-mode 1))
 
 (defun reload-config ()
-  "Reload init.el and all files in the lisp directory."
+  "Reload init.el and reset locally configured OpenCode features."
   (interactive)
   (message "Reloading configuration...")
-  
-  ;; Reload all .el files in lisp directory
-  (let ((lisp-dir "~/.emacs.d/lisp/"))
-    (when (file-directory-p lisp-dir)
-      (dolist (file (directory-files lisp-dir t "\\.el$"))
-        (message "Reloading %s" (file-name-nondirectory file))
-        (load-file file))))
-  
-  ;; Reload init.el
-  (message "Reloading init.el")
-  (load-file "~/.emacs.d/init.el")
-  
+  (let ((init-file (expand-file-name "init.el" user-emacs-directory))
+        (lisp-dir (expand-file-name "lisp/" user-emacs-directory))
+        (opencode-dir (expand-file-name "vendor/opencode/" user-emacs-directory)))
+    ;; Make sure vendored OpenCode wins before any local libraries require it.
+    (add-to-list 'load-path opencode-dir)
+    (add-to-list 'load-path lisp-dir)
+    ;; Stop the SSE process before unloading opencode so pending plz callbacks
+    ;; do not run against partially unloaded definitions.
+    (when (fboundp 'opencode-disconnect)
+      (ignore-errors (opencode-disconnect)))
+    ;; Drop loaded local features so reloading picks up file changes.
+    (dolist (feature '(agent-board
+                       opencode
+                       opencode-permission
+                       opencode-question
+                       opencode-sessions
+                       opencode-format-tool-calls
+                       opencode-api
+                       opencode-common
+                       opencode-diff-parser
+                       opencode-flycheck))
+      (when (featurep feature)
+        (ignore-errors (unload-feature feature t))))
+    ;; Reload init so package/config load-path and use-package autoloads are
+    ;; re-established.  Do not blindly load every lisp/*.el file here; several
+    ;; local libraries have top-level setup intended to run only on demand.
+    (message "Reloading init.el")
+    (load-file init-file))
   (message "Configuration reloaded successfully!"))
 
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
