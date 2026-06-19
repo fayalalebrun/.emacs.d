@@ -1,4 +1,5 @@
 (setq gnutls-algorithm-priority "NORMAL:-VERS-TLS1.3")
+(setq load-prefer-newer t)
 
 ;; OSC 52 clipboard support for terminal Emacs
 (when (not (display-graphic-p))
