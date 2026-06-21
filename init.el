@@ -826,8 +826,19 @@ Some packages/modes can transiently remap these during startup."
               #'my-envrc--shell-command-x-with-local-env)
   (shell-command-x-mode 1))
 
+(defun my-reload-config--opencode-buffer-p (buffer)
+  "Return non-nil if BUFFER is an OpenCode-related live buffer."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (or (memq major-mode '(opencode-session-mode
+                                opencode-session-control-mode
+                                agent-board-mode))
+             (derived-mode-p 'opencode-session-mode
+                             'opencode-session-control-mode
+                             'agent-board-mode)))))
+
 (defun reload-config ()
-  "Reload init.el and reset locally configured OpenCode features."
+  "Reload init.el, preserving live OpenCode buffers when present."
   (interactive)
   (message "Reloading configuration...")
   (let ((init-file (expand-file-name "init.el" user-emacs-directory))
@@ -836,23 +847,30 @@ Some packages/modes can transiently remap these during startup."
     ;; Make sure vendored OpenCode wins before any local libraries require it.
     (add-to-list 'load-path opencode-dir)
     (add-to-list 'load-path lisp-dir)
-    ;; Stop the SSE process before unloading opencode so pending plz callbacks
-    ;; do not run against partially unloaded definitions.
-    (when (fboundp 'opencode-disconnect)
-      (ignore-errors (opencode-disconnect)))
-    ;; Drop loaded local features so reloading picks up file changes.
-    (dolist (feature '(agent-board
-                       opencode
-                       opencode-permission
-                       opencode-question
-                       opencode-sessions
-                       opencode-format-tool-calls
-                       opencode-api
-                       opencode-common
-                       opencode-diff-parser
-                       opencode-flycheck))
-      (when (featurep feature)
-        (ignore-errors (unload-feature feature t))))
+    (let ((opencode-buffer-count 0))
+      (dolist (buffer (buffer-list))
+        (when (my-reload-config--opencode-buffer-p buffer)
+          (setq opencode-buffer-count (1+ opencode-buffer-count))))
+      (if (> opencode-buffer-count 0)
+          (message "Skipping OpenCode unload: %d live OpenCode buffer(s)"
+                   opencode-buffer-count)
+        ;; Stop the SSE process before unloading opencode so pending plz callbacks
+        ;; do not run against partially unloaded definitions.
+        (when (fboundp 'opencode-disconnect)
+          (ignore-errors (opencode-disconnect)))
+        ;; Drop loaded local features so reloading picks up file changes.
+        (dolist (feature '(agent-board
+                           opencode
+                           opencode-permission
+                           opencode-question
+                           opencode-sessions
+                           opencode-format-tool-calls
+                           opencode-api
+                           opencode-common
+                           opencode-diff-parser
+                           opencode-flycheck))
+          (when (featurep feature)
+            (ignore-errors (unload-feature feature t))))))
     ;; Reload init so package/config load-path and use-package autoloads are
     ;; re-established.  Do not blindly load every lisp/*.el file here; several
     ;; local libraries have top-level setup intended to run only on demand.
