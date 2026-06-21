@@ -799,6 +799,8 @@ Some packages/modes can transiently remap these during startup."
 (use-package hydra
   :ensure t)
 
+(load-file (expand-file-name "~/sources/zerostack/emacs/zerostack.el"))
+
 ;; Keep shell-command-x and envrc behavior together.
 (defun my-envrc--shell-command-x-with-local-env (orig-fun command &optional output-buffer &rest args)
   "Run shell-command-x with a stable envrc environment."
