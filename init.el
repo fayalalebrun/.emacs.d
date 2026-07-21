@@ -1090,3 +1090,33 @@ Some packages/modes can transiently remap these during startup."
  ;; Your init file should contain only one such instance.
  ;; If there is more than one, they won't work right.
  '(aw-leading-char-face ((t (:foreground "red" :background "black" :weight bold :height 3.0)))))
+
+(defconst my-system-theme-light 'tsdh-light)
+(defconst my-system-theme-dark 'manoj-dark)
+
+(defun my-system-theme-apply (&rest _)
+  (let* ((setting (condition-case nil
+                      (dbus-call-method
+                       :session "org.freedesktop.portal.Desktop"
+                       "/org/freedesktop/portal/desktop"
+                       "org.freedesktop.portal.Settings" "Read"
+                       "org.freedesktop.appearance" "color-scheme")
+                    (error nil)))
+         (value (car-safe (car-safe setting)))
+         (theme (if (eq value 1)
+                    my-system-theme-dark
+                  my-system-theme-light)))
+    (unless (equal custom-enabled-themes (list theme))
+      (mapc #'disable-theme custom-enabled-themes)
+      (load-theme theme t))))
+
+(when (and (eq system-type 'gnu/linux) (require 'dbus nil t))
+  (when (bound-and-true-p my-system-theme-signal)
+    (dbus-unregister-object my-system-theme-signal))
+  (setq my-system-theme-signal
+        (dbus-register-signal
+         :session "org.freedesktop.portal.Desktop"
+         "/org/freedesktop/portal/desktop"
+         "org.freedesktop.portal.Settings" "SettingChanged"
+         #'my-system-theme-apply))
+  (my-system-theme-apply))
