@@ -548,7 +548,7 @@ Uses project-scoped tags so services from different projects can coexist."
 
 ;;;###autoload
 (defun workspace-start-mock-robots ()
-  "Start mock robots in an eat buffer."
+  "Start mock robots in a shell buffer."
   (interactive)
   (if (not (and (featurep 'projectile) (projectile-project-p)))
       (message "Not in a projectile project")
@@ -590,23 +590,21 @@ Uses project-scoped tags so services from different projects can coexist."
       (when (and robot-systems (> (length robot-systems) 0))
         (let* ((arcade-path (concat project-root "arcade"))
                (robot-args (mapconcat 'shell-quote-argument robot-systems " "))
-               (command (format "nix run .#start-arcade -- --mock-standalone --speedup %s %s" speedup robot-args))
+               (command (format "nix run .#start-arcade -- --speedup %s %s" speedup robot-args))
                (buffer-name (format workspace-mock-robots-buffer-format (mapconcat 'identity robot-systems ", "))))
           (if (file-exists-p arcade-path)
               (progn
-                (require 'eat)
                 (let ((default-directory arcade-path))
-                  (let ((eat-buffer (eat)))
-                    (with-current-buffer eat-buffer
-                      (process-send-string (get-buffer-process eat-buffer) (concat command "; exit\n"))
-                      (rename-buffer buffer-name))
-                    (switch-to-buffer buffer-name)))
+                  (let ((shell-buffer (shell buffer-name)))
+                    (with-current-buffer shell-buffer
+                      (comint-send-string shell-buffer (concat command "\n")))
+                    (switch-to-buffer shell-buffer)))
                 (message "Mock robots started: %s" (mapconcat 'identity robot-systems ", ")))
             (message "Arcade directory %s not found" arcade-path)))))))
 
 ;;;###autoload
 (defun workspace-shutdown-all ()
-  "Shutdown all workspace processes including prodigy services and eat buffers.
+  "Shutdown all workspace processes including prodigy services and shell buffers.
 Only stops services belonging to the current project."
   (interactive)
   (if (not (and (featurep 'projectile) (projectile-project-p)))
@@ -685,16 +683,14 @@ Only stops services belonging to the current project."
              (speedup "1")
              (arcade-path (concat project-root "arcade"))
              (robot-args (mapconcat 'shell-quote-argument default-robots " "))
-             (command (format "nix run .#start-arcade -- --mock-standalone --speedup %s %s" speedup robot-args))
+             (command (format "nix run .#start-arcade -- --speedup %s %s" speedup robot-args))
              (buffer-name (format workspace-mock-robots-buffer-format (mapconcat 'identity default-robots ", "))))
         (if (file-exists-p arcade-path)
             (progn
-              (require 'eat)
               (let ((default-directory arcade-path))
-                (let ((eat-buffer (eat)))
-                  (with-current-buffer eat-buffer
-                    (process-send-string (get-buffer-process eat-buffer) (concat command "; exit\n"))
-                    (rename-buffer buffer-name))))
+                (let ((shell-buffer (shell buffer-name)))
+                  (with-current-buffer shell-buffer
+                    (comint-send-string shell-buffer (concat command "\n")))))
               (message "Mock robots started: %s" (mapconcat 'identity default-robots ", ")))
           (message "Arcade directory %s not found" arcade-path)))
       

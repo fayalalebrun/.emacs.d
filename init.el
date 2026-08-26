@@ -847,6 +847,8 @@ Some packages/modes can transiently remap these during startup."
     ;; Make sure vendored OpenCode wins before any local libraries require it.
     (add-to-list 'load-path opencode-dir)
     (add-to-list 'load-path lisp-dir)
+    (when (featurep 'workspace-utils)
+      (ignore-errors (unload-feature 'workspace-utils t)))
     (let ((opencode-buffer-count 0))
       (dolist (buffer (buffer-list))
         (when (my-reload-config--opencode-buffer-p buffer)
