@@ -1,6 +1,0 @@
-Vendored from https://codeberg.org/sczi/opencode.el.git
-Upstream commit: 8b4649f5454b9cfedcc750177099d1f97a7703b7
-
-Local changes:
-- none currently; the old recursive SSE disconnect workaround is obsolete in
-  upstream now that it uses a single global event subscription

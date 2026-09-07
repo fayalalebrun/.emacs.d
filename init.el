@@ -721,48 +721,6 @@ Some packages/modes can transiently remap these during startup."
 (use-package web-server
   :ensure t)
 
-(use-package opencode
-  :load-path "vendor/opencode"
-  :demand t
-  :commands (opencode
-             opencode-connect
-             opencode-disconnect
-             opencode-select-project
-             opencode-select-open-session
-             opencode-new-worktree
-             opencode-new-session
-             opencode-select-idle
-             opencode-visit-last-idle
-             opencode-add-file-dwim
-             opencode-add-region
-             opencode-add-buffer-dwim
-             opencode-insert-line-reference)
-  :bind (("C-c o" . opencode)
-         ("C-c O" . opencode-insert-line-reference))
-  :config
-  (setq opencode-host "127.0.0.1"
-        opencode-port 4097
-        opencode-auto-start-server nil)
-  (setq opencode-worktree-directory
-        (expand-file-name "var/opencode/worktrees/" user-emacs-directory))
-  (make-directory opencode-worktree-directory t)
-  (global-set-key (kbd "C-c O") #'opencode-insert-line-reference))
-
-(use-package agent-board
-  :load-path "lisp"
-  :after opencode
-  :commands (agent-board)
-  :bind (("C-c w" . agent-board)))
-
-;; Remove obsolete slash-command advice from older config versions.  Upstream
-;; now handles nil slash-command descriptions in `opencode--annotated-completion'.
-(when (fboundp 'my-opencode-insert-slash-command-a)
-  (when (fboundp 'opencode-insert-slash-command)
-    (advice-remove 'opencode-insert-slash-command
-                   #'my-opencode-insert-slash-command-a))
-  (fmakunbound 'my-opencode-insert-slash-command-a))
-(when (fboundp 'my-opencode--slash-command-candidates)
-  (fmakunbound 'my-opencode--slash-command-candidates))
 
 (use-package ai-code
   :quelpa (ai-code :fetcher github :repo "tninja/ai-code-interface.el")
@@ -827,56 +785,15 @@ Some packages/modes can transiently remap these during startup."
               #'my-envrc--shell-command-x-with-local-env)
   (shell-command-x-mode 1))
 
-(defun my-reload-config--opencode-buffer-p (buffer)
-  "Return non-nil if BUFFER is an OpenCode-related live buffer."
-  (and (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (or (memq major-mode '(opencode-session-mode
-                                opencode-session-control-mode
-                                agent-board-mode))
-             (derived-mode-p 'opencode-session-mode
-                             'opencode-session-control-mode
-                             'agent-board-mode)))))
-
 (defun reload-config ()
-  "Reload init.el, preserving live OpenCode buffers when present."
+  "Reload init.el."
   (interactive)
   (message "Reloading configuration...")
   (let ((init-file (expand-file-name "init.el" user-emacs-directory))
-        (lisp-dir (expand-file-name "lisp/" user-emacs-directory))
-        (opencode-dir (expand-file-name "vendor/opencode/" user-emacs-directory)))
-    ;; Make sure vendored OpenCode wins before any local libraries require it.
-    (add-to-list 'load-path opencode-dir)
+        (lisp-dir (expand-file-name "lisp/" user-emacs-directory)))
     (add-to-list 'load-path lisp-dir)
     (when (featurep 'workspace-utils)
       (ignore-errors (unload-feature 'workspace-utils t)))
-    (let ((opencode-buffer-count 0))
-      (dolist (buffer (buffer-list))
-        (when (my-reload-config--opencode-buffer-p buffer)
-          (setq opencode-buffer-count (1+ opencode-buffer-count))))
-      (if (> opencode-buffer-count 0)
-          (message "Skipping OpenCode unload: %d live OpenCode buffer(s)"
-                   opencode-buffer-count)
-        ;; Stop the SSE process before unloading opencode so pending plz callbacks
-        ;; do not run against partially unloaded definitions.
-        (when (fboundp 'opencode-disconnect)
-          (ignore-errors (opencode-disconnect)))
-        ;; Drop loaded local features so reloading picks up file changes.
-        (dolist (feature '(agent-board
-                           opencode
-                           opencode-permission
-                           opencode-question
-                           opencode-sessions
-                           opencode-format-tool-calls
-                           opencode-api
-                           opencode-common
-                           opencode-diff-parser
-                           opencode-flycheck))
-          (when (featurep feature)
-            (ignore-errors (unload-feature feature t))))))
-    ;; Reload init so package/config load-path and use-package autoloads are
-    ;; re-established.  Do not blindly load every lisp/*.el file here; several
-    ;; local libraries have top-level setup intended to run only on demand.
     (message "Reloading init.el")
     (load-file init-file))
   (message "Configuration reloaded successfully!"))
