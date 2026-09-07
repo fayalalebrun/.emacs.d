@@ -273,6 +273,7 @@ Some packages/modes can transiently remap these during startup."
 	("C-s" . helm-occur)
 	("C-x C-b" . helm-buffers-list))
   :config
+  (helm-mode 1)
   ;; Prevent helm from interfering with eat terminals
   ;; Split inside current window to preserve layout
   (setq helm-split-window-inside-p t)
