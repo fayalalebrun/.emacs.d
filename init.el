@@ -28,6 +28,10 @@
 
 (require 'use-package)
 
+(use-package avy
+  :ensure t
+  :bind ("M-g l" . avy-goto-line))
+
 ;; Keep ~/.emacs.d clean - redirect backup/autosave/etc to standard locations
 (use-package no-littering
   :ensure t
