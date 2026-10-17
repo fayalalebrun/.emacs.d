@@ -52,6 +52,10 @@
 (use-package quelpa-use-package
   :ensure t)
 
+(use-package anki-study
+  :quelpa (anki-study :fetcher github :repo "fayalalebrun/anki-study.el")
+  :commands anki-study)
+
 (use-package plz
   :quelpa (plz :fetcher github :repo "alphapapa/plz.el"))
 
