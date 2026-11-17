@@ -40,6 +40,8 @@
   "Format string for Arduino shell buffer names.")
 (defconst workspace-mock-robots-buffer-format "*Mock Robots - %s*"
   "Format string for mock robots buffer names.")
+(defconst workspace-portico-shell-buffer-format "*Portico - %s*"
+  "Format string for Portico shell buffer names.")
 
 ;; Variables for remembering last inputs
 (defvar workspace-integration-test-history nil
@@ -112,20 +114,10 @@ Uses project-scoped tags so services from different projects can coexist."
 
       (prodigy-define-service
         :name (format "%s/proxy" workspace-name)
-        :command "/home/francisco/grpcwebproxy/grpcwebproxy-v0.15.0-linux-x86_64"
-        :args '("--backend_addr" "localhost:6001"
-                "--run_tls_server=false"
-                "--server_http_debug_port" "9900"
-                "--server_http_max_read_timeout=300s"
-                "--server_http_max_write_timeout=300s")
+        :command "nix"
+        :args '("run" ".#grpcwebproxy" "--" "6001" "9900")
+        :cwd workspace-path
         :tags (list project-tag 'workspace 'vision 'proxy))
-
-      (prodigy-define-service
-        :name (format "%s/portico" workspace-name)
-        :command "yarn"
-        :args '("run" "dev")
-        :cwd (concat workspace-path "/portico")
-        :tags (list project-tag 'workspace 'vision))
 
       (prodigy-define-service
         :name (format "%s/atrium" workspace-name)
@@ -413,6 +405,82 @@ Uses project-scoped tags so services from different projects can coexist."
           (message "Running integration test: %s" command)
           (async-shell-command command "*Integration Test*"))))))
 
+;;;###autoload
+(defun workspace-port-free-p (port)
+  "Return non-nil when PORT is available on localhost."
+  (if (executable-find "nc")
+      (not (zerop (call-process "nc" nil nil nil
+                                "-z" "localhost" (number-to-string port))))
+    (let (process)
+      (unwind-protect
+          (condition-case nil
+              (progn
+                (setq process (make-network-process
+                               :name (format "workspace-port-check-%d" port)
+                               :buffer nil
+                               :host 'local
+                               :service port
+                               :server t
+                               :noquery t))
+                t)
+            (file-error nil))
+        (when (and process (process-live-p process))
+          (delete-process process))))))
+
+(defun workspace-first-free-port (&optional start-port)
+  "Return the first free localhost port at or above START-PORT."
+  (cl-loop for port from (or start-port 3000)
+           when (workspace-port-free-p port)
+           return port))
+
+(defun workspace-portico-buffer-active-p (buffer)
+  "Return non-nil when BUFFER appears to have an active Portico dev server."
+  (with-current-buffer buffer
+    (let* ((process (get-buffer-process buffer))
+           (tail (buffer-substring-no-properties
+                  (max (point-min) (- (point-max) 1000))
+                  (point-max))))
+      (and (process-live-p process)
+           ;; A live shell sitting at its prompt means Vite already exited.
+           (not (string-match-p "\\]\$[[:blank:]]*\\'" tail))))))
+
+(defun workspace-start-portico-in-buffer (buffer-name portico-path workspace-name)
+  "Start Portico for WORKSPACE-NAME in BUFFER-NAME from PORTICO-PATH."
+  (let* ((default-directory portico-path)
+         (port (workspace-first-free-port 3000))
+         (command (format "VITE_PORT=%d PORT=%d corepack pnpm dev --port %d\n" port port port))
+         (buffer (get-buffer buffer-name))
+         (process (and buffer (get-buffer-process buffer))))
+    (unless (process-live-p process)
+      (when buffer
+        (kill-buffer buffer))
+      (let ((explicit-shell-file-name "bash"))
+        (shell buffer-name))
+      (setq buffer (get-buffer buffer-name)
+            process (get-buffer-process buffer)))
+    (comint-send-string process command)
+    (switch-to-buffer buffer-name)
+    (message "Portico started for %s on port %d" workspace-name port)))
+
+;;;###autoload
+(defun workspace-portico-shell ()
+  "Start Portico in a workspace shell, or switch to it if it already exists."
+  (interactive)
+  (if (not (and (featurep 'projectile) (projectile-project-p)))
+      (message "Not in a projectile project")
+    (let* ((project-root (projectile-project-root))
+           (workspace-name (projectile-project-name))
+           (portico-path (concat project-root "portico"))
+           (buffer-name (format workspace-portico-shell-buffer-format workspace-name)))
+      (cond
+       ((and (get-buffer buffer-name)
+             (workspace-portico-buffer-active-p (get-buffer buffer-name)))
+        (switch-to-buffer buffer-name))
+       ((not (file-directory-p portico-path))
+        (message "Portico directory %s not found" portico-path))
+       (t
+        (workspace-start-portico-in-buffer buffer-name portico-path workspace-name))))))
+
 ;; Workspace hydra - organized using :column feature
 (defhydra hydra-workspace (:color blue :columns 4)
   "Workspace Commands"
@@ -421,6 +489,7 @@ Uses project-scoped tags so services from different projects can coexist."
   ("m" workspace-start-mock-robots "mock robots")
   ("n" workspace-open-notebook "notebook" :column "Development")
   ("a" workspace-arduino-shell "arduino cli")
+  ("o" workspace-portico-shell "portico")
   ("i" workspace-run-integration-test "integration test")
   ("y" workspace-yarn-install "yarn install")
   ("g" workspace-generate-proto "generate proto" :column "Code Tools")
@@ -637,19 +706,21 @@ Only stops services belonging to the current project."
       (dolist (buffer (buffer-list))
         (let ((buffer-name (buffer-name buffer)))
           (when (and buffer-name  ; Check buffer-name is not nil
-                     (or
-                      ;; Mock Robots buffers (contain project-specific system names)
-                      (string-match "\\*Mock Robots" buffer-name)
-                      ;; Arduino Shell buffer for this workspace
-                      (string-equal buffer-name (format workspace-arduino-shell-buffer-format workspace-name))
-                      ;; IPython buffers from this workspace's notebooks
-                      (and (string-match "\\*IPython\\[.*\\]\\*" buffer-name)
-                           (with-current-buffer buffer
-                             (and (boundp 'default-directory)
-                                  (string-prefix-p project-root default-directory))))))
+                      (or
+                       ;; Mock Robots buffers (contain project-specific system names)
+                       (string-match "\\*Mock Robots" buffer-name)
+                       ;; Arduino Shell buffer for this workspace
+                       (string-equal buffer-name (format workspace-arduino-shell-buffer-format workspace-name))
+                       ;; Portico shell buffer for this workspace
+                       (string-equal buffer-name (format workspace-portico-shell-buffer-format workspace-name))
+                       ;; IPython buffers from this workspace's notebooks
+                       (and (string-match "\\*IPython\\[.*\\]\\*" buffer-name)
+                            (with-current-buffer buffer
+                              (and (boundp 'default-directory)
+                                   (string-prefix-p project-root default-directory))))))
             (when (buffer-live-p buffer)
               ;; For shell buffers, try to kill the process first
-              (when (string-match "\\*Arduino Shell\\*\\|\\*Mock Robots" buffer-name)
+              (when (string-match "\\*Arduino Shell\\*\\|\\*Mock Robots\\|\\*Portico" buffer-name)
                 (with-current-buffer buffer
                   (when (and (boundp 'comint-process-echoes)
                             (get-buffer-process buffer))
