@@ -381,7 +381,7 @@ Uses project-scoped tags so services from different projects can coexist."
       (when (file-directory-p arcade-path)
         (message "Running cargo fmt in arcade...")
         (let ((default-directory arcade-path))
-          (async-shell-command "cargo fmt --all" "*Format Arcade*"))
+          (async-shell-command (workspace-mech-rust-command "cargo fmt --all") "*Format Arcade*"))
         (setq formatted-count (1+ formatted-count)))
 
       ;; Format vision
@@ -546,6 +546,16 @@ Uses project-scoped tags so services from different projects can coexist."
               (switch-to-buffer-other-window buffer-name))
           (message "No machines found for system '%s'" selected-system))))))
 
+(defun workspace-mech-rust-command (command)
+  "Run COMMAND with the current Mech checkout's pinned Rust toolchain.
+Override an inherited RUSTC so Cargo cannot select the system compiler."
+  (concat "nix shell .#nixpkgs.rust-toolchain --command env RUSTC=rustc " command))
+
+(defun workspace-mock-robots-command (systems)
+  "Build the Mech launcher command for robot SYSTEMS."
+  (workspace-mech-rust-command
+   (concat "nix run .#start-arcade -- "
+           (mapconcat #'shell-quote-argument systems " "))))
 ;;;###autoload
 (defun workspace-start-mock-robots ()
   "Start mock robots in a shell buffer."
@@ -584,13 +594,10 @@ Uses project-scoped tags so services from different projects can coexist."
                                                                      nil nil nil nil default-robots-string)))
                               (if (and selected (> (length selected) 0))
                                   selected
-                                default-robots))))
-           (speedup-input (read-string "Enter speedup (default: 1): "))
-           (speedup (if (string-empty-p speedup-input) "1" speedup-input)))
+                                default-robots)))))
       (when (and robot-systems (> (length robot-systems) 0))
         (let* ((arcade-path (concat project-root "arcade"))
-               (robot-args (mapconcat 'shell-quote-argument robot-systems " "))
-               (command (format "nix run .#start-arcade -- --speedup %s %s" speedup robot-args))
+               (command (workspace-mock-robots-command robot-systems))
                (buffer-name (format workspace-mock-robots-buffer-format (mapconcat 'identity robot-systems ", "))))
           (if (file-exists-p arcade-path)
               (progn
@@ -678,12 +685,10 @@ Only stops services belonging to the current project."
                               (prodigy-start-service service)))
                           (message "All %s prodigy services started" name))))
       
-      ;; Start mock robots with default settings (Pisa 11, Petra 3, Panama 2, speedup 1)
+      ;; Start mock robots with the default systems.
       (let* ((default-robots '("Pisa 11" "Petra 3" "Panama 2"))
-             (speedup "1")
              (arcade-path (concat project-root "arcade"))
-             (robot-args (mapconcat 'shell-quote-argument default-robots " "))
-             (command (format "nix run .#start-arcade -- --speedup %s %s" speedup robot-args))
+             (command (workspace-mock-robots-command default-robots))
              (buffer-name (format workspace-mock-robots-buffer-format (mapconcat 'identity default-robots ", "))))
         (if (file-exists-p arcade-path)
             (progn
